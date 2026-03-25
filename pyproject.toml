@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "novel-chat"
+version = "0.1.0"
+description = "A novel RAG system with Agentic memory, Milvus Hybrid Search, and Neo4j GraphRAG"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    # --- 基础配置与环境变量 ---
+    "python-dotenv>=1.0.0",
+    "pydantic-settings>=2.1.0",
+    "pydantic>=2.5.0",
+    
+    # --- LLM 交互与大模型 ---
+    "openai>=1.10.0",        # OpenAI 官方 SDK (用于调用 GPT 或兼容 API 的本地模型)
+    "tiktoken>=0.5.0",       # Token 计算工具
+    
+    # --- 向量模型与重排序 (Cross-Encoder) ---
+    "sentence-transformers>=2.3.0", # 用于加载 Embedding 模型和 BGE-Reranker
+    "torch>=2.0.0",                 # 深度学习底层依赖
+    
+    # --- 向量数据库 (Milvus) ---
+    "pymilvus>=2.4.0",       # 必须大于 2.4.0 才完美支持内置混合检索与稀疏向量
+    
+    # --- 图数据库与图算法 (Neo4j & GraphRAG) ---
+    "neo4j>=5.15.0",         # Neo4j 官方 Python 驱动
+    "networkx>=3.2.0",       # 内存级图拓扑计算
+    "cdlib>=0.3.0",          # 社区发现算法库 (包含 Leiden 算法封装)
+    "leidenalg>=0.10.0",     # 核心 Leiden 算法底层 C++ 绑定
+    "igraph>=0.11.0",        # cdlib 和 leidenalg 的强依赖
+    
+    # --- NLP 与文本处理 ---
+    "spacy>=3.7.0",          # 强大的 NLP 库，用于极简路由时的实体提取
+    
+    # --- 其他实用工具 ---
+    "numpy>=1.26.0",
+    "pandas>=2.1.0",
+    "tqdm>=4.66.0",          # 进度条 (处理小说切片时极度需要)
+    "aiohttp>=3.9.0",        # 异步网络请求
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "black>=23.11.0",
+    "isort>=5.12.0",
+]

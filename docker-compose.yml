@@ -1,0 +1,115 @@
+# NovelChat - 底层数据库基础设施
+# 包含: Milvus (v2.5.x 支持混合检索) + Neo4j (GraphDB)
+
+services:
+  # ==========================================
+  # Milvus 依赖 1: etcd (用于元数据存储)
+  # ==========================================
+  etcd:
+    container_name: milvus-etcd
+    image: quay.io/coreos/etcd:v3.5.16
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/etcd:/etcd
+    command: etcd --advertise-client-urls http://0.0.0.0:2379 --listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # ==========================================
+  # Milvus 依赖 2: MinIO (用于对象/文件存储)
+  # ==========================================
+  minio:
+    container_name: milvus-minio
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "9001:9001"
+      - "9000:9000"
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/minio:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # ==========================================
+  # 核心引擎 1: Milvus Standalone (v2.5.x)
+  # ==========================================
+  standalone:
+    container_name: milvus-standalone
+    image: milvusdb/milvus:v2.5.5
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+    - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379 
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/milvus:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+    ports:
+      - "19530:19530" # Milvus RPC 端口 (Python 客户端连接用)
+      - "9091:9091"   # Milvus Metrics/Health 端口
+    depends_on:
+      etcd: 
+        condition: service_healthy
+      minio: 
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 32G  # 初始给 32G，如果小说量达到千万级分片，可调至 64G
+        reservations:
+          memory: 16G  # 预留 16G 确保稳定性
+
+  # ==========================================
+  # 核心引擎 2: Neo4j (图数据库)
+  # ==========================================
+  neo4j:
+    container_name: neo4j
+    image: neo4j:5-community
+    environment:
+      # 初始化默认密码 
+      # - NEO4J_AUTH=admin/admin
+      - NEO4J_AUTH=none
+      # 增加内存分配，应对复杂的 GraphRAG 社区计算
+      # Pagecache 用于缓存磁盘上的图数据，16G 足够缓存数亿个关系
+      - NEO4J_server_memory_pagecache_size=16G
+      # Heap 用于处理 Cypher 查询和 GraphRAG 的复杂计算
+      - NEO4J_server_memory_heap_initial__size=16G
+      - NEO4J_server_memory_heap_max__size=32G
+    deploy:
+      resources:
+        limits:
+          memory: 48G  # 容器物理上限给到 48G，为系统预留一些 Buffer
+        reservations:
+          memory: 24G
+    ports:
+      - "7474:7474"   # 浏览器可视化界面端口
+      - "7687:7687"   # Bolt 协议端口 (Python 客户端代码连接用)
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/neo4j/data:/data
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/neo4j/logs:/logs
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/neo4j/import:/var/lib/neo4j/import
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/neo4j/plugins:/plugins
+    healthcheck:
+      test: ["CMD", "wget", "http://localhost:7474", "-O", "-"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
