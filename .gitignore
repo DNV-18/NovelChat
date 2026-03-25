@@ -7,4 +7,5 @@ data/raw/*
 data/processed/*
 data/memory/*
 !data/**/.gitkeep
-volumes/*
+volumes/
+.vscode/

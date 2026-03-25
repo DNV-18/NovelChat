@@ -2,8 +2,7 @@ import os
 from functools import lru_cache
 from typing import Any
 
-# 假设我们在 src/config.py 中定义了全局配置 Settings
-# from src.config import settings
+from src.config import settings
 
 class ModelFactory:
     """
