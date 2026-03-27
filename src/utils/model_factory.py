@@ -151,7 +151,7 @@ if __name__ == "__main__":
         print("LLM 思考过程:", response.choices[0].message.reasoning)
         print("LLM 响应:", response.choices[0].message.content)
         print("LLM 结束理由:", response.choices[0].finish_reason)
-        print("LLM tokens 使用情况:", json.dumps(response.usage.dict(), indent=2))
+        print("LLM tokens 使用情况:", json.dumps(response.usage.model_dump(), indent=2))
     except Exception as e:
         print("LLM 请求失败:", e)
 
