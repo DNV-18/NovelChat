@@ -1,7 +1,5 @@
-import os
 import requests
-from functools import lru_cache
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from src.config import settings
 
@@ -64,30 +62,147 @@ class ModelFactory:
     
     _embedding_model_instance = None
     _reranker_model_instance = None
+    _async_llm_client_instance = None
+
+    @staticmethod
+    def _merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+        """浅到中等深度字典合并，主要用于 extra_body 配置拼接。"""
+        merged = dict(base)
+        for k, v in override.items():
+            if isinstance(v, dict) and isinstance(merged.get(k), dict):
+                merged[k] = ModelFactory._merge_dict(merged[k], v)
+            else:
+                merged[k] = v
+        return merged
+
+    @staticmethod
+    def _resolve_model_name(model_tier: str, model_name: str | None = None) -> str:
+        """统一解析模型名。"""
+        if model_name is not None:
+            return model_name
+        if model_tier == "smart":
+            return settings.smart_llm_model
+        if model_tier == "cheap":
+            return settings.cheap_llm_model
+        raise ValueError(f"未知的 LLM 层级: {model_tier}")
+
+    @staticmethod
+    def _resolve_enable_thinking(model_tier: str, enable_thinking: bool | None = None) -> bool:
+        """统一解析是否开启思考。"""
+        if enable_thinking is not None:
+            return enable_thinking
+        if model_tier == "smart":
+            return True
+        if model_tier == "cheap":
+            return False
+        raise ValueError(f"未知的 LLM 层级: {model_tier}")
 
     @classmethod
-    def get_llm(cls, model_tier: str = "smart") -> Any:
+    def _build_extra_body(
+        cls,
+        model_tier: str,
+        enable_thinking: bool | None = None,
+        extra_body: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        """统一构造 extra_body。"""
+        resolved_enable_thinking = cls._resolve_enable_thinking(model_tier, enable_thinking)
+        base_extra_body: Dict[str, Any] = {
+            "chat_template_kwargs": {"enable_thinking": resolved_enable_thinking}
+        }
+        if not extra_body:
+            return base_extra_body
+        return cls._merge_dict(base_extra_body, extra_body)
+
+    @classmethod
+    def get_llm(cls) -> Any:
         """
-        获取大语言模型 (LLM) 客户端/实例。
-        
-        :param model_tier: "smart" (用于主控Agent等复杂任务) 或 "cheap" (用于上下文补全、路由等简单任务)
-        :return: 配置好 API Key 和 Base URL 的 LLM 客户端对象
+        获取同步 LLM 客户端。
+        仅负责创建客户端，不负责模型选择。
         """
         from openai import OpenAI
         
         api_key = settings.openai_api_key
         base_url = settings.openai_base_url
         
-        client = OpenAI(api_key=api_key, base_url=base_url)
-        
-        if model_tier == "smart":
-            client.default_model = settings.smart_llm_model
-        elif model_tier == "cheap":
-            client.default_model = settings.cheap_llm_model
-        else:
-            raise ValueError(f"未知的 LLM 层级: {model_tier}")
-            
-        return client
+        return OpenAI(api_key=api_key, base_url=base_url)
+    
+    @classmethod
+    def chat_completion(
+        cls,
+        messages: List[Dict[str, str]],
+        model_tier: str = "smart",
+        model_name: str | None = None,
+        temperature: float = 0.1,
+        max_tokens: int = 16384,
+        extra_body: Dict[str, Any] | None = None,
+        enable_thinking: bool | None = None,
+    ) -> Any:
+        """
+        统一同步 Chat Completions 调用入口。
+        与 chat_completion_async 参数语义保持一致。
+        """
+        resolved_model = cls._resolve_model_name(model_tier=model_tier, model_name=model_name)
+        resolved_extra_body = cls._build_extra_body(
+            model_tier=model_tier,
+            enable_thinking=enable_thinking,
+            extra_body=extra_body,
+        )
+
+        client = cls.get_llm()
+        return client.chat.completions.create(
+            model=resolved_model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            extra_body=resolved_extra_body,
+        )
+
+    @classmethod
+    def get_async_llm(cls) -> Any:
+        """
+        获取异步 LLM 客户端。
+        用于批量并发任务（如上下文注入），采用单例模式复用连接配置。
+        """
+        from openai import AsyncOpenAI
+
+        if cls._async_llm_client_instance is None:
+            cls._async_llm_client_instance = AsyncOpenAI(
+                api_key=settings.openai_api_key,
+                base_url=settings.openai_base_url,
+            )
+        return cls._async_llm_client_instance
+
+    @classmethod
+    async def chat_completion_async(
+        cls,
+        messages: List[Dict[str, str]],
+        model_tier: str = "cheap",
+        model_name: str | None = None,
+        temperature: float = 0.1,
+        max_tokens: int = 16384,
+        extra_body: Dict[str, Any] | None = None,
+        enable_thinking: bool | None = None,
+    ) -> Any:
+        """
+        统一异步 Chat Completions 调用入口。
+        业务代码不直接触碰 SDK 细节，全部经由工厂转发。
+        """
+        resolved_model = cls._resolve_model_name(model_tier=model_tier, model_name=model_name)
+        resolved_extra_body = cls._build_extra_body(
+            model_tier=model_tier,
+            enable_thinking=enable_thinking,
+            extra_body=extra_body,
+        )
+
+        client = cls.get_async_llm()
+        return await client.chat.completions.create(
+            model=resolved_model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            extra_body=resolved_extra_body,
+        )
+
 
     @classmethod
     def get_embedding_model(cls) -> Any:
@@ -142,16 +257,16 @@ if __name__ == "__main__":
     print("=" * 50)
     print("测试 LLM 模型")
     try:
-        smart_llm = ModelFactory.get_llm(model_tier="smart")
-        response = smart_llm.chat.completions.create(
-            model=smart_llm.default_model,
+        response = ModelFactory.chat_completion(
             messages=[{"role": "user", "content": "你好，请简单介绍一下你自己。"}],
-            max_tokens=16384
+            model_tier="cheap",
+            max_tokens=16384,
         )
-        print("LLM 思考过程:", response.choices[0].message.reasoning)
-        print("LLM 响应:", response.choices[0].message.content)
-        print("LLM 结束理由:", response.choices[0].finish_reason)
-        print("LLM tokens 使用情况:", json.dumps(response.usage.model_dump(), indent=2))
+        print("LLM 响应对象:", response)
+        # print("LLM 思考过程:", response.choices[0].message.reasoning)
+        # print("LLM 响应:", response.choices[0].message.content)
+        # print("LLM 结束理由:", response.choices[0].finish_reason)
+        # print("LLM tokens 使用情况:", json.dumps(response.usage.model_dump(), indent=2))
     except Exception as e:
         print("LLM 请求失败:", e)
 

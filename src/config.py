@@ -37,13 +37,20 @@ class Settings(BaseSettings):
     # ==========================================
     # 📚 2. 小说数据处理与切片配置
     # ==========================================
-    # 宏观切分：默认的正则表达式（根据小说排版可能需要调整）
-    chapter_split_regex: str = Field(r"第[零一二三四五六七八九十百千]+章", description="章节切分正则")
-    
+    novel_raw_file_path: Path = Field(
+        default=BASE_DIR / "data" / "raw" / "tsxk.txt",
+        description="原始小说文本路径"
+    )
+    novel_file_encoding: str = Field("gb18030", description="小说文本编码")
+    heading_max_line_chars: int = Field(40, description="标题行最大长度阈值")
+
     # 微观切分：语义切分的上下文限制
     chunk_max_tokens: int = Field(800, description="每个微观 Chunk 的最大 Token 数量")
-    chunk_overlap_tokens: int = Field(50, description="切片硬截断时的安全重叠区大小")
-    semantic_chunk_threshold: float = Field(0.85, description="语义切分的余弦相似度断崖阈值 (0-1)")
+    semantic_breakpoint_percentile: int = Field(90, description="语义断点百分位阈值")
+    context_inject_max_concurrency: int = Field(20, description="上下文注入并发数")
+
+    # Tokenizer 配置
+    local_tokenizer_path: str = Field("/home/dnv/models/Qwen3.5-27B", description="本地 tokenizer 目录")
 
     # ==========================================
     # 🕸️ 3. 数据库连接配置
