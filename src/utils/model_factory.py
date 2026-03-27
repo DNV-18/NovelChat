@@ -1,8 +1,60 @@
 import os
+import requests
 from functools import lru_cache
-from typing import Any
+from typing import Any, List, Tuple
 
 from src.config import settings
+
+class APIEmbeddingModel:
+    def __init__(self, base_url, api_key, model_name):
+        self.base_url = base_url
+        self.api_key = api_key
+        self.model_name = model_name
+        self.endpoint = f"{self.base_url}/embeddings"
+
+    def encode(self, texts: List[str]) -> List[List[float]]:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": self.model_name,
+            "input": texts
+        }
+        response = requests.post(self.endpoint, headers=headers, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        return [item["embedding"] for item in data["data"]]
+
+class APIRerankerModel:
+    def __init__(self, base_url, api_key, model_name):
+        self.base_url = base_url
+        self.api_key = api_key
+        self.model_name = model_name
+
+        if self.base_url.endswith("/v1"):
+            self.endpoint = f"{self.base_url}/rerank"
+        else:
+            self.endpoint = f"{self.base_url}/v1/rerank"
+
+    def predict(self, sentence_pairs: List[Tuple[str, str]]) -> List[float]:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        scores = []
+        for q, doc in sentence_pairs:
+            payload = {
+                "model": self.model_name,
+                "query": q,
+                "documents": [doc]
+            }
+            response = requests.post(self.endpoint, headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            scores.append(data["results"][0]["relevance_score"])
+        return scores
 
 class ModelFactory:
     """
@@ -23,17 +75,15 @@ class ModelFactory:
         """
         from openai import OpenAI
         
-        # 实际开发中，这些配置应从 src.config.settings 中读取
-        api_key = os.getenv("OPENAI_API_KEY", "your-api-key")
-        base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        api_key = settings.openai_api_key
+        base_url = settings.openai_base_url
         
         client = OpenAI(api_key=api_key, base_url=base_url)
         
-        # 通过为客户端绑定一个默认模型名，方便业务层直接使用
         if model_tier == "smart":
-            client.default_model = "gpt-4o" # 或 Claude 3.5 Sonnet 等顶级模型
+            client.default_model = settings.smart_llm_model
         elif model_tier == "cheap":
-            client.default_model = "gpt-4o-mini" # 或 Qwen-Turbo 等高性价比模型
+            client.default_model = settings.cheap_llm_model
         else:
             raise ValueError(f"未知的 LLM 层级: {model_tier}")
             
@@ -46,14 +96,13 @@ class ModelFactory:
         用于语义切分和向量入库。采用单例模式。
         """
         if cls._embedding_model_instance is None:
-            print("🚀 首次加载 Embedding 模型，这可能需要一点时间...")
-            from sentence_transformers import SentenceTransformer
-            
-            # 例如选用 BAAI 的 bge-large-zh-v1.5 或其他优秀中文模型
-            model_name = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-large-zh-v1.5")
-            # 内部缓存实例
-            cls._embedding_model_instance = SentenceTransformer(model_name)
-            print("✅ Embedding 模型加载完成！")
+            print("🚀 连接到本地 Embedding 模型...")
+            cls._embedding_model_instance = APIEmbeddingModel(
+                base_url=settings.embedding_base_url,
+                api_key=settings.embedding_api_key,
+                model_name=settings.embedding_model_name
+            )
+            print("✅ Embedding 模型连接完成！")
             
         return cls._embedding_model_instance
 
@@ -64,14 +113,13 @@ class ModelFactory:
         用于多路召回后的二次精准排序。采用单例模式。
         """
         if cls._reranker_model_instance is None:
-            print("⚖️ 首次加载 Reranker 模型，准备分配显存...")
-            from sentence_transformers import CrossEncoder
-            
-            # 例如选用 BGE 的重排模型
-            model_name = os.getenv("RERANKER_MODEL_NAME", "BAAI/bge-reranker-base")
-            # 内部缓存实例
-            cls._reranker_model_instance = CrossEncoder(model_name)
-            print("✅ Reranker 模型加载完成！")
+            print("⚖️ 连接本地 Reranker 模型...")
+            cls._reranker_model_instance = APIRerankerModel(
+                base_url=settings.reranker_base_url,
+                api_key=settings.reranker_api_key,
+                model_name=settings.reranker_model_name
+            )
+            print("✅ Reranker 模型连接完成！")
             
         return cls._reranker_model_instance
 
@@ -86,17 +134,43 @@ class ModelFactory:
         pass
 
 # ---------------------------------------------------------
-# 业务层调用示例 (伪代码)：
+# 业务层调用示例 ：
 # ---------------------------------------------------------
 if __name__ == "__main__":
-    # 1. 业务：需要给图谱提取实体（属于复杂任务）
-    smart_llm = ModelFactory.get_llm(model_tier="smart")
-    # response = smart_llm.chat.completions.create(model=smart_llm.default_model, messages=[...])
+    import json
     
-    # 2. 业务：需要把长文本切成句子算相似度
-    embed_model = ModelFactory.get_embedding_model()
-    # vectors = embed_model.encode(["句子1", "句子2"])
-    
-    # 3. 业务：需要给多路召回的结果打分
-    reranker = ModelFactory.get_reranker_model()
-    # scores = reranker.predict([("问题", "候选答案1"), ("问题", "候选答案2")])
+    print("=" * 50)
+    print("测试 LLM 模型")
+    try:
+        smart_llm = ModelFactory.get_llm(model_tier="smart")
+        response = smart_llm.chat.completions.create(
+            model=smart_llm.default_model,
+            messages=[{"role": "user", "content": "你好，请简单介绍一下你自己。"}],
+            max_tokens=16384
+        )
+        print("LLM 思考过程:", response.choices[0].message.reasoning)
+        print("LLM 响应:", response.choices[0].message.content)
+        print("LLM 结束理由:", response.choices[0].finish_reason)
+        print("LLM tokens 使用情况:", json.dumps(response.usage.dict(), indent=2))
+    except Exception as e:
+        print("LLM 请求失败:", e)
+
+    print("=" * 50)
+    print("测试 Embedding 模型")
+    try:
+        embed_model = ModelFactory.get_embedding_model()
+        vectors = embed_model.encode(["我爱北京天安门", "天安门上太阳升"])
+        print("向量维度:", len(vectors[0]))
+        print("第一条前5个维度的值:", vectors[0][:5])
+    except Exception as e:
+        print("Embedding 请求失败:", e)
+
+    print("=" * 50)
+    print("测试 Reranker 模型")
+    try:
+        reranker = ModelFactory.get_reranker_model()
+        scores = reranker.predict([("北京的景点", "天安门广场非常好玩"), ("北京的景点", "苹果手机很实用")])
+        print("关联度得分:", scores)
+    except Exception as e:
+        print("Reranker 请求失败:", e)
+    print("=" * 50)

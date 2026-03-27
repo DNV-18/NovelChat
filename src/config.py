@@ -17,17 +17,22 @@ class Settings(BaseSettings):
     # 🤖 1. LLM 与 本地模型选型配置
     # ==========================================
     openai_api_key: str = Field(..., description="LLM API Key")
-    openai_base_url: str = Field("https://api.openai.com/v1", description="LLM Base URL")
+    openai_base_url: str = Field("http://localhost:6006/v1", description="LLM Base URL")
     
     # 默认的主力/聪明模型 (主控 Agent 使用)
-    smart_llm_model: str = Field("gpt-4o", description="主控 Agent 使用的高级模型")
+    smart_llm_model: str = Field("Qwen3.5-27B", description="主控 Agent 使用的高级模型")
     # 默认的廉价/快速模型 (路由、补充上下文使用)
-    cheap_llm_model: str = Field("gpt-4o-mini", description="流水线任务使用的高性价比模型")
+    cheap_llm_model: str = Field("Qwen3.5-27B", description="流水线任务使用的高性价比模型")
     
-    # 稠密向量 Embedding 模型名称 (自动下载)
-    embedding_model_name: str = Field("BAAI/bge-large-zh-v1.5", description="文本向量化模型")
-    # 交叉编码器 Reranker 模型名称 (自动下载)
-    reranker_model_name: str = Field("BAAI/bge-reranker-base", description="多路召回重排序模型")
+    # 稠密向量 Embedding 模型名称
+    embedding_api_key: str = Field("EMPTY", description="Embedding API Key")
+    embedding_base_url: str = Field("http://localhost:5005/v1", description="Embedding Base URL")
+    embedding_model_name: str = Field("Qwen3-Embedding-8B", description="文本向量化模型")
+    
+    # 交叉编码器 Reranker 模型名称
+    reranker_api_key: str = Field("EMPTY", description="Reranker API Key")
+    reranker_base_url: str = Field("http://localhost:7007/v1", description="Reranker Base URL")
+    reranker_model_name: str = Field("Qwen3-Reranker-4B", description="多路召回重排序模型")
 
     # ==========================================
     # 📚 2. 小说数据处理与切片配置
