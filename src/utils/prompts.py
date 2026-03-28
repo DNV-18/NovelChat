@@ -1,5 +1,9 @@
 """集中管理项目中使用的提示词模板。"""
 
+import json
+
+
+### 上下文注入提示词
 CONTEXT_INJECTOR_SYSTEM_PROMPT = """你是一个专业的数据对齐专家，擅长在长文本中进行精准的信息提取与指代消解。
 
 ### 任务核心
@@ -30,3 +34,75 @@ def build_context_injector_user_prompt(chapter_content: str, chunk_text: str) ->
 </chunk>
 
 请生成该片段的背景信息："""
+
+
+### 图谱抽取提示词
+GRAPH_EXTRACTOR_SYSTEM_PROMPT = """你是一个高级图谱数据抽取专家。请从科幻修真小说文本中抽取核心实体和关系。
+
+【实体类型 (type) 指南】
+尽量将实体归入以下大类：人物、地点、组织势力、怪兽/族群、宝物/装备、功法/秘籍、境界/等级。
+如果遇到极特殊专有名词无法归类，允许自定义简短类型名。
+
+【关系词 (relation) 归一化规则（极度重要）】
+请对同义关系进行归一化提取：
+1) 杀戮类：斩杀/灭掉/击毙 -> 击杀
+2) 获取类：得到/买下/抢走 -> 获得
+3) 归属/加入类：统一为 属于 或 加入
+4) 战斗类：统一为 击败 / 重伤 / 交战
+5) 修炼类：统一为 修炼 或 突破
+6) 传承类：统一为 拜师 或 传承自
+其他动作请尽量提取为简洁、基础动词。
+
+【严格 JSON 输出格式】
+必须输出合法 JSON，且仅包含 nodes 和 edges 两个字段。
+{
+    "nodes": [
+        {"id": "罗峰", "type": "人物", "description": "精神念师"},
+        {"id": "九重雷刀", "type": "功法", "description": "地球上极难修炼的究极武学"}
+    ],
+    "edges": [
+        {"source": "罗峰", "target": "九重雷刀", "relation": "修炼", "description": "罗峰购买并开始修炼九重雷刀"}
+    ]
+}
+
+要求：
+1) 实体 id 必须精确简洁，同一实体不要出现别名（如“疯子”统一为“罗峰”）。
+2) 只抽取文本中明确提及的信息，绝对禁止脑补。
+3) 若无法抽取，返回 {"nodes": [], "edges": []}。
+4) 只输出 JSON，不要输出解释、前后缀、Markdown 代码块。"""
+
+
+def build_graph_extractor_user_prompt(text: str) -> str:
+	"""构造 GraphRAG 实体关系抽取用户提示词（仅提供数据）。"""
+	return f"""请基于以下文本进行图谱抽取：
+<text>
+{text}
+</text>"""
+
+
+### 社区摘要提示词
+COMMUNITY_SUMMARY_SYSTEM_PROMPT = """你是一个结构化剧情总结助手。
+你的输出必须满足：
+1. 仅输出摘要正文，不要前缀、编号、解释或 Markdown。
+2. 语言必须是中文。
+3. 保留关键实体名，避免使用模糊指代。
+4. 不编造输入中不存在的事实。"""
+
+
+def build_community_summary_user_prompt(level: int, content_data) -> str:
+    """构造社区摘要用户提示词（仅提供数据）。"""
+    if level == 0:
+        instruction = (
+            "你将看到一个底层社区的实体与关系。"
+            "请输出一段紧凑剧情摘要（中文，80-160字），包含核心人物、关键冲突与事件结果。"
+        )
+    else:
+        instruction = (
+            "你将看到若干子社区摘要。"
+            "请自底向上归纳成更高层剧情脉络（中文，100-220字），避免重复，突出主线推进。"
+        )
+
+    return (
+        f"{instruction}\n"
+        f"数据如下：\n{json.dumps(content_data, ensure_ascii=False)}"
+    )

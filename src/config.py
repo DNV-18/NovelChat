@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     milvus_uri: str = Field("http://localhost:19530", description="Milvus 连接地址")
     milvus_db_name: str = Field("novel_chat", description="Milvus 默认数据库名称")
     milvus_collection_name: str = Field("novel_chunks", description="存放小说切片的集合名称")
+    milvus_community_summary_collection: str = Field("community_summaries", description="社区摘要集合名称")
+    milvus_vector_dim: int = Field(4096, description="Milvus 稠密向量维度")
+    milvus_insert_batch_size: int = Field(500, description="Milvus 批量写入 batch 大小")
 
     # ==========================================
     # 🧠 4. 记忆管理 (Agentic Memory) 路径配置
