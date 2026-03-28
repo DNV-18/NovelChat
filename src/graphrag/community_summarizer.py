@@ -28,7 +28,6 @@ class CommunitySummarizer:
         neo4j_uri,
         neo4j_user,
         neo4j_pwd,
-        llm_client,
         embedding_model,
         milvus_uri=None,
         summary_max_concurrency: int = 5,
@@ -36,7 +35,6 @@ class CommunitySummarizer:
         # 1. 挂载 Neo4j
         self.driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_pwd))
         # 2. 挂载模型
-        self.llm = llm_client
         self.embedding_model = embedding_model
         self.summary_semaphore = asyncio.Semaphore(summary_max_concurrency)
         # 3. 挂载 Milvus 并初始化摘要专属集合
@@ -211,8 +209,8 @@ class CommunitySummarizer:
                         {"role": "system", "content": COMMUNITY_SUMMARY_SYSTEM_PROMPT},
                         {"role": "user", "content": prompt},
                     ],
-                    model_tier="smart",
-                    model_name=settings.smart_llm_model,
+                    model_tier="cheap",
+                    model_name=settings.cheap_llm_model,
                     temperature=0.2,
                     max_tokens=10240,
                 )
@@ -287,7 +285,7 @@ class CommunitySummarizer:
             if child_ids:
                 session.run(cypher, child_ids=child_ids, cid=community_id)
 
-    def process_and_summarize(self):
+    async def process_and_summarize(self):
         """【主控流水线】"""
         print("📥 正在从 Neo4j 拉取全图拓扑...")
         # 1. 从 Neo4j 拉取所有实体和边，组装成 NetworkX Graph
@@ -402,12 +400,10 @@ class CommunitySummarizer:
                     }
                 )
 
-            level_results = asyncio.run(
-                self._summarize_level_parallel(
-                    level=level,
-                    jobs=jobs,
-                    community_pbar=community_pbar,
-                )
+            level_results = await self._summarize_level_parallel(
+                level=level,
+                jobs=jobs,
+                community_pbar=community_pbar,
             )
 
             for result in level_results:

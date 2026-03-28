@@ -7,6 +7,7 @@ from tqdm import tqdm
 from src.ingestion.document_parser import NovelParser
 from src.ingestion.semantic_chunker import SemanticChunker
 from src.ingestion.context_injector import ContextInjector
+from src.ingestion.milvus_indexer import MilvusIndexer
 from src.utils.model_factory import ModelFactory
 from src.config import BASE_DIR, settings
 
@@ -26,7 +27,7 @@ class IngestionPipeline:
 
     async def run(self):
         print(f"🚀 开始执行 Phase 1 数据注入流水线...\n" + "="*50)
-        stage_bar = tqdm(total=4, desc="Pipeline 阶段", unit="stage")
+        stage_bar = tqdm(total=5, desc="Pipeline 阶段", unit="stage")
 
         # ---------------------------------------------------------
         # Step 1: 物理宏观切片 (按“篇-章”切分)
@@ -62,7 +63,7 @@ class IngestionPipeline:
         injector = ContextInjector.from_settings(
             model_name=settings.cheap_llm_model,
             max_concurrency=settings.context_inject_max_concurrency,
-            model_tier= "smart"
+            model_tier= "cheap"
         )
         
         # 执行异步高并发请求
@@ -79,13 +80,29 @@ class IngestionPipeline:
         print("\n💾 正在将处理结果持久化保存到本地文件系统...")
         self._save_to_disk(enriched_chunks)
         stage_bar.update(1)
+
+        # ---------------------------------------------------------
+        # Step 5: 向量化并入库 Milvus
+        # ---------------------------------------------------------
+        print("\n📥 正在将处理结果向量化并写入 Milvus...")
+        indexer = MilvusIndexer(
+            collection_name=settings.milvus_collection_name,
+            dim=settings.milvus_vector_dim,
+            milvus_uri=settings.milvus_uri,
+        )
+        indexer.insert_data(
+            json_file_path=str(self.output_file),
+            embedding_model=embedding_model,
+            batch_size=settings.milvus_insert_batch_size,
+        )
+        stage_bar.update(1)
+
         stage_bar.close()
         
         print("\n" + "="*50)
         print("🎉 Phase 1 完美收官！")
         print(f"👉 下一步你可以:")
-        print(f"   1. 读取 {self.output_file.name} 灌入 Milvus 数据库。")
-        print(f"   2. 读取 {self.output_file.name} 传给 Phase 2 提取 GraphRAG 图谱。")
+        print(f"   1. 读取 {self.output_file.name} 继续执行 Phase 2 图谱抽取。")
 
     def _save_to_disk(self, data: List[Dict]):
         """将最终结果保存为 JSON 文件"""
