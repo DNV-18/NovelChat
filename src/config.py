@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     # Neo4j 
     neo4j_uri: str = Field("bolt://localhost:7687", description="Neo4j 连接地址")
     neo4j_username: str = Field("neo4j", description="Neo4j 用户名")
-    neo4j_password: str = Field("neo4j", description="Neo4j 密码")
+    neo4j_password: str = Field("admin123", description="Neo4j 密码")
     
     # Milvus
     milvus_uri: str = Field("http://localhost:19530", description="Milvus 连接地址")

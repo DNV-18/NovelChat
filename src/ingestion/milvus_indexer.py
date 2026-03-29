@@ -4,6 +4,7 @@ from pathlib import Path
 from tqdm import tqdm
 from pymilvus import (
     connections,
+    db,
     utility,
     FieldSchema,
     CollectionSchema,
@@ -25,15 +26,22 @@ class MilvusIndexer:
         dim: int | None = None,
         milvus_uri: str | None = None,
     ):
-        # 连接本地 Milvus（走配置）
-        connections.connect(
-            "default",
-            uri=milvus_uri or settings.milvus_uri,
-            db_name=settings.milvus_db_name,
-        )
+        self._milvus_uri = milvus_uri or settings.milvus_uri
+        self._ensure_milvus_db(settings.milvus_db_name)
         self.collection_name = collection_name or settings.milvus_collection_name
         self.dim = dim or settings.milvus_vector_dim
         self.collection = None
+
+    def _ensure_milvus_db(self, db_name: str):
+        """确保目标 Milvus 数据库存在，不存在则自动创建。"""
+        # 先连接默认数据库，才能执行数据库管理操作。
+        connections.connect("default", uri=self._milvus_uri)
+        existing_dbs = db.list_database()
+        if db_name not in existing_dbs:
+            print(f"🛠️ Milvus 数据库 '{db_name}' 不存在，正在自动创建...")
+            db.create_database(db_name)
+        # 切换到目标数据库供后续 collection 操作使用。
+        connections.connect("default", uri=self._milvus_uri, db_name=db_name)
 
     def create_collection(self):
         """定义表结构 (Schema) 并创建 Collection"""

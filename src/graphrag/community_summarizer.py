@@ -6,7 +6,7 @@ import igraph as ig
 import leidenalg
 from tqdm import tqdm
 from neo4j import GraphDatabase
-from pymilvus import connections, utility, FieldSchema, CollectionSchema, DataType, Collection
+from pymilvus import connections, db, utility, FieldSchema, CollectionSchema, DataType, Collection
 from src.config import settings
 from src.utils.model_factory import ModelFactory
 from src.utils.prompts import (
@@ -38,13 +38,19 @@ class CommunitySummarizer:
         self.embedding_model = embedding_model
         self.summary_semaphore = asyncio.Semaphore(summary_max_concurrency)
         # 3. 挂载 Milvus 并初始化摘要专属集合
-        connections.connect(
-            "default",
-            uri=milvus_uri or settings.milvus_uri,
-            db_name=settings.milvus_db_name,
-        )
+        self._milvus_uri = milvus_uri or settings.milvus_uri
+        self._ensure_milvus_db(settings.milvus_db_name)
         self.summary_collection_name = settings.milvus_community_summary_collection
         self._init_milvus_collection()
+
+    def _ensure_milvus_db(self, db_name: str):
+        """确保目标 Milvus 数据库存在，不存在则自动创建。"""
+        connections.connect("default", uri=self._milvus_uri)
+        existing_dbs = db.list_database()
+        if db_name not in existing_dbs:
+            print(f"🛠️ Milvus 数据库 '{db_name}' 不存在，正在自动创建...")
+            db.create_database(db_name)
+        connections.connect("default", uri=self._milvus_uri, db_name=db_name)
 
     def _init_milvus_collection(self):
         """在 Milvus 中初始化一个专门存全局摘要的表"""

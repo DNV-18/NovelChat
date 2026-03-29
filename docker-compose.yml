@@ -86,14 +86,21 @@ services:
     image: neo4j:5-community
     environment:
       # 初始化默认密码 
-      # - NEO4J_AUTH=admin/admin
-      - NEO4J_AUTH=none
+      - NEO4J_AUTH=neo4j/admin123
       # 增加内存分配，应对复杂的 GraphRAG 社区计算
       # Pagecache 用于缓存磁盘上的图数据，16G 足够缓存数亿个关系
       - NEO4J_server_memory_pagecache_size=16G
       # Heap 用于处理 Cypher 查询和 GraphRAG 的复杂计算
       - NEO4J_server_memory_heap_initial__size=16G
       - NEO4J_server_memory_heap_max__size=32G
+      # --- 新增的 APOC 配置 ---
+      # 1. 声明需要安装的插件，容器启动时会自动下载 APOC Core 版本的 jar 包
+      - NEO4J_PLUGINS=["apoc"]
+      # 2. 解除 APOC 的安全沙箱限制，允许其执行如文件导入/导出、网络请求等高级操作
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+      # 3. (可选) 如果需要使用 APOC 导出/导入文件到 import 目录，需开启以下配置
+      # - NEO4J_apoc_export_file_enabled=true
+      # - NEO4J_apoc_import_file_enabled=true
     deploy:
       resources:
         limits:
