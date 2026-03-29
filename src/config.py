@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     chunk_max_tokens: int = Field(800, description="每个微观 Chunk 的最大 Token 数量")
     semantic_breakpoint_percentile: int = Field(90, description="语义断点百分位阈值")
     context_inject_max_concurrency: int = Field(20, description="上下文注入并发数")
+    context_inject_model_tier: str = Field("cheap", description="上下文注入使用的模型层级")
+    graph_extract_model_tier: str = Field("cheap", description="实体关系抽取使用的模型层级")
+    community_summary_model_tier: str = Field("cheap", description="社区摘要生成使用的模型层级")
 
     # Tokenizer 配置
     local_tokenizer_path: str = Field("/home/dnv/models/Qwen3.5-27B", description="本地 tokenizer 目录")
@@ -78,10 +81,14 @@ class Settings(BaseSettings):
     )
     # 长期事件集在 Milvus 中的专属 Collection
     milvus_event_collection: str = Field("long_term_events", description="长期事件记忆集合名称")
+    memory_event_summary_max_chars: int = Field(200, description="长期事件摘要最大字数")
+    memory_event_summary_model_tier: str = Field("smart", description="长期事件摘要使用的模型层级")
 
     # ==========================================
     # ⚙️ 5. 系统运行参数
     # ==========================================
+    query_router_model_tier: str = Field("smart", description="Query Router 使用的模型层级")
+    query_router_history_turns: int = Field(3, description="Query Router 参与判定的最近历史轮数")
     max_retries: int = Field(3, description="API 请求失败重试次数")
     rrf_k: int = Field(60, description="RRF (倒数秩融合) 的平滑常数 k")
     top_k_retrieval: int = Field(60, description="单路召回的初始 Chunk 数量")

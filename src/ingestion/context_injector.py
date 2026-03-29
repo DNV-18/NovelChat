@@ -17,13 +17,17 @@ class ContextInjector:
     """
     def __init__(
         self,
-        model_tier: str = "cheap",
+        model_tier: str | None = None,
         model_name: str | None = None,
         max_concurrency: int | None = None,
     ):
-        self.model_tier = model_tier
-        # 默认使用配置里的便宜模型，适合批量上下文注入任务
-        self.model_name = model_name or settings.cheap_llm_model
+        self.model_tier = model_tier or settings.context_inject_model_tier
+        if model_name is not None:
+            self.model_name = model_name
+        elif self.model_tier == "smart":
+            self.model_name = settings.smart_llm_model
+        else:
+            self.model_name = settings.cheap_llm_model
         # 限制并发量
         resolved_concurrency = max_concurrency or settings.context_inject_max_concurrency
         self.semaphore = asyncio.Semaphore(resolved_concurrency)
@@ -31,14 +35,14 @@ class ContextInjector:
     @classmethod
     def from_settings(
         cls,
-        model_tier: str = "cheap",
+        model_tier: str | None = None,
         model_name: str | None = None,
         max_concurrency: int | None = None,
     ) -> "ContextInjector":
         """使用项目配置创建注入器实例。"""
         return cls(
-            model_tier=model_tier,
-            model_name=model_name or settings.cheap_llm_model,
+            model_tier=model_tier or settings.context_inject_model_tier,
+            model_name=model_name,
             max_concurrency=max_concurrency or settings.context_inject_max_concurrency,
         )
 
@@ -245,7 +249,7 @@ if __name__ == "__main__":
             )
 
         print("\n[Stage 3/3] 上下文注入 (context_injector) ...")
-        injector = ContextInjector.from_settings(model_tier= "cheap")
+        injector = ContextInjector.from_settings()
         results = await injector.inject_context_async(micro_chunks, sample_chapters)
         print(f"[Stage 3/3] 完成: 注入结果 {len(results)}")
         

@@ -215,8 +215,7 @@ class CommunitySummarizer:
                         {"role": "system", "content": COMMUNITY_SUMMARY_SYSTEM_PROMPT},
                         {"role": "user", "content": prompt},
                     ],
-                    model_tier="cheap",
-                    model_name=settings.cheap_llm_model,
+                    model_tier=settings.community_summary_model_tier,
                     temperature=0.2,
                     max_tokens=10240,
                 )

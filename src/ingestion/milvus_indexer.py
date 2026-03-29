@@ -60,6 +60,7 @@ class MilvusIndexer:
             # 【核心基调】：为原文文本开启分词器和倒排索引，支持 BM25 全文检索！
             FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=65535, 
                         enable_analyzer=True, # 开启分词
+                        enable_match=True, # 开启全文匹配能力（TEXT_MATCH/PHRASE_MATCH）
                         analyzer_params={"type": "chinese"}), # 使用中文分词器
             
             # 稠密向量字段
@@ -76,6 +77,12 @@ class MilvusIndexer:
             "params": {"M": 16, "efConstruction": 200}
         }
         self.collection.create_index(field_name="dense_vector", index_params=index_params)
+
+        # 3. 为文本字段创建倒排索引，支持 BM25/全文检索
+        text_index_params = {
+            "index_type": "INVERTED"
+        }
+        self.collection.create_index(field_name="text", index_params=text_index_params)
         
         print(f"✅ Milvus 集合 '{self.collection_name}' 创建成功，双路索引已就绪！")
 

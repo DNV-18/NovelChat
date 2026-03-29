@@ -107,3 +107,61 @@ def build_community_summary_user_prompt(level: int, content_data) -> str:
         f"{instruction}\n"
         f"数据如下：\n{json.dumps(content_data, ensure_ascii=False)}"
     )
+
+
+### 长期事件记忆摘要提示词
+MEMORY_EVENT_SUMMARY_SYSTEM_PROMPT = """你是一个长期记忆压缩助手。
+你的输出必须满足：
+1. 仅输出中文摘要正文，不要前缀、编号、解释或 Markdown。
+2. 严格基于输入事实，不得编造。
+3. 优先保留时间、地点、人物、动作、结果与结论。
+4. 摘要应便于后续向量检索，尽量包含可检索关键词。"""
+
+
+def build_memory_event_summary_user_prompt(event_description: str, max_chars: int) -> str:
+    """构造长期事件记忆摘要用户提示词（仅提供数据和长度约束）。"""
+    return (
+        f"请将下面事件压缩为不超过{max_chars}字的中文高密度摘要。"
+        "请覆盖时间、地点、人物、关键动作、结果。\n"
+        f"事件原文：\n{event_description}"
+    )
+
+
+### Query Router 提示词
+QUERY_ROUTER_SYSTEM_PROMPT = """你是一个高精度的 RAG 智能路由与指代消解引擎。当前知识库领域为【吞噬星空等相关小说/原著世界观】。
+你的任务是：分析用户的最新提问，结合历史记录补全缺失的上下文（指代消解），选择最合适的检索策略，并提取核心实体。
+
+【处理步骤（SOP）】
+1. 指代分析：检查用户提问中是否包含“他”、“那个”、“之前说的”等代词或省略语。如果存在，必须根据【最近对话历史】将其替换为具体的实体名称。
+2. 独立改写：生成一个脱离当前上下文、能够作为独立搜索词（Query）使用的完整句子。
+3. 模式判定：根据改写后的句子，严格归类到以下 4 种模式之一。
+4. 实体提取：仅在 LOCAL 模式下，提取检索关键词。
+
+【检索模式定义与判定界限】
+- LOCAL（局部事实）：提问指向原著中具体的点。例如：具体的战斗细节、物品掉落与获取、特定事件的起因结果、具体角色的招式或当前境界。
+  * 实体要求：只提取极具辨识度的【专有名词】（人名、功法名、宝物名、地点）。数量控制在 1-3 个，绝对不要包含动词、形容词或泛指名词（如“实力”、“怎么”）。
+- GLOBAL（宏观全局）：提问指向大跨度的时间线、宏观背景或总结性内容。例如：某个人物的完整一生、整个时代的势力分布、一个大篇章的剧情概述。
+- MEMORY（用户记忆）：提问关于“系统设定”、“用户自身信息”或“刚刚的聊天内容本身”。例如：“我刚才问了你什么？”、“你叫什么名字？”、“记住我喜欢简洁的回答”。
+- DIRECT（日常闲聊）：无需查阅任何资料即可直接回答的寒暄或通用指令。例如：“你好”、“哈哈”、“继续”、“停止”。
+
+【输出要求】
+你必须且只能输出合法的 JSON，严格遵循以下结构：
+{
+    "reasoning": "1. 指代消解：... 2. 意图分析：... 3. 模式选择：...",
+    "mode": "LOCAL | GLOBAL | MEMORY | DIRECT",
+    "rewritten_query": "补全主语和背景的完整提问",
+    "entities": ["实体1", "实体2"] // 非 LOCAL 模式输出空列表 []
+}"""
+
+def build_query_router_user_prompt(user_query: str, history_text: str) -> str:
+    """构造 Query Router 用户提示词（仅传递上下文数据）。"""
+    # 【优化点4】：User Prompt 变得极其干净，只包含需要处理的数据，防止模型注意力分散。
+    return f"""请根据提供的对话历史和用户最新提问，输出路由判断的 JSON。
+
+<chat_history>
+{history_text if history_text else "无历史记录"}
+</chat_history>
+
+<user_query>
+{user_query}
+</user_query>"""
