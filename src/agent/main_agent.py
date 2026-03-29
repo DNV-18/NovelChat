@@ -1,4 +1,5 @@
 import json
+import threading
 from typing import List, Dict
 
 # 假设已导入你的模块
@@ -13,12 +14,22 @@ class NovelAgent:
     """
     def __init__(self):
         # 初始化模型
-        self.smart_llm = ModelFactory.get_llm(model_tier="smart")
-        self.cheap_llm = ModelFactory.get_llm(model_tier="cheap")
+        self.smart_llm = ModelFactory.get_llm()
         
         # 初始化组件
         self.router = QueryRouter()
         self.memory_manager = MemoryManager()
+
+    def _save_chat_turn_memory_background(self, rewritten_query: str, final_response: str) -> None:
+        """后台静默保存每轮问答记忆，不阻塞主回复。"""
+        try:
+            result = self.memory_manager.save_chat_turn_to_memory(
+                rewritten_query=rewritten_query,
+                ai_response=final_response,
+            )
+            print(f"📝 [后台自动记忆] {result}")
+        except Exception as e:
+            print(f"⚠️ [后台自动记忆] 写入失败: {e}")
         
     def _execute_tool_calls(self, tool_calls) -> List[str]:
         """
@@ -33,8 +44,6 @@ class NovelAgent:
             
             if function_name == "update_kv_profile":
                 res = self.memory_manager.update_kv_profile(arguments["key"], arguments["value"])
-            elif function_name == "save_event_to_long_term":
-                res = self.memory_manager.save_event_to_long_term(arguments["event_description"])
             elif function_name == "add_graph_memory":
                 res = self.memory_manager.add_graph_memory(arguments["source_entity"], arguments["target_entity"], arguments["relation"])
             else:
@@ -84,7 +93,7 @@ class NovelAgent:
 【检索到的参考资料】：
 {retrieved_context if retrieved_context else "无"}
 
-请根据以上参考资料和你的知识回答用户。如果用户刚才的话语中透露了新的长期设定、偏好、或者重要事实，请调用相应的工具（Tools）保存它们！"""
+请根据以上参考资料和你的知识回答用户。如果用户刚才的话语中透露了新的长期设定或关系信息，请在需要时调用相应工具保存；每轮问答的事件性记忆由系统自动后台摘要入库。"""
 
         messages = [{"role": "system", "content": system_prompt}] + chat_history + [{"role": "user", "content": user_message}]
 
@@ -95,7 +104,7 @@ class NovelAgent:
         response = self.smart_llm.chat.completions.create(
             model=getattr(self.smart_llm, "default_model", "gpt-4o"),
             messages=messages,
-            # 【核心秘密】：在这里把你的那 3 个记忆工具挂给大模型！
+            # 【核心秘密】：在这里把记忆工具挂给大模型！
             tools=AGENT_MEMORY_TOOLS,
             tool_choice="auto", # 让大模型自己决定用不用工具
             temperature=0.7
@@ -112,12 +121,21 @@ class NovelAgent:
             # OpenAI 的机制：如果它调了工具，它可能把话放在内容里，也可能没有内容。
             # 为了简单展示，我们只返回其内容（如果有的话）
             if response_message.content:
-                return response_message.content
+                final_response = response_message.content
             else:
-                return "好的，我已经记下你的设定位了！还有什么想了解的吗？"
+                final_response = "好的，我已经记下你的设定位了！还有什么想了解的吗？"
         else:
             # 大模型觉得这句话不值得记录，只是正常的问答
-            return response_message.content
+            final_response = response_message.content or ""
+
+        # 5. 后台异步触发每轮对话自动记忆，不阻塞用户等待
+        threading.Thread(
+            target=self._save_chat_turn_memory_background,
+            args=(route_result.rewritten_query, final_response),
+            daemon=True,
+        ).start()
+
+        return final_response
 
 
 # ==========================================

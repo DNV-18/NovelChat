@@ -79,10 +79,10 @@ class Settings(BaseSettings):
         default=BASE_DIR / "data" / "memory" / "kv_profile.json", 
         description="KV 档案表 (JSON) 存储路径"
     )
-    # 长期事件集在 Milvus 中的专属 Collection
-    milvus_event_collection: str = Field("long_term_events", description="长期事件记忆集合名称")
-    memory_event_summary_max_chars: int = Field(200, description="长期事件摘要最大字数")
-    memory_event_summary_model_tier: str = Field("smart", description="长期事件摘要使用的模型层级")
+    # 每轮对话自动记忆在 Milvus 中的专属 Collection
+    milvus_chat_memory_collection: str = Field("chat_turn_memories", description="对话轮次记忆集合名称")
+    memory_event_summary_max_chars: int = Field(10000, description="对话摘要最大字数")
+    memory_event_summary_model_tier: str = Field("smart", description="对话摘要使用的模型层级")
 
     # ==========================================
     # ⚙️ 5. 系统运行参数
@@ -93,6 +93,7 @@ class Settings(BaseSettings):
     rrf_k: int = Field(60, description="RRF (倒数秩融合) 的平滑常数 k")
     top_k_retrieval: int = Field(60, description="单路召回的初始 Chunk 数量")
     top_k_rerank: int = Field(6, description="Cross-Encoder 精排后最终喂给大模型的 Chunk 数量")
+    rerank_threshold: float = Field(0.1, description="Cross-Encoder 精排绝对阈值，低于该分数的结果将被剔除")
 
     # 声明从哪读取环境变量
     model_config = SettingsConfigDict(

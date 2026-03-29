@@ -2,6 +2,7 @@ import os
 import json
 import uuid
 import time
+import re
 from neo4j import GraphDatabase
 from pymilvus import connections, db, utility, FieldSchema, CollectionSchema, DataType, Collection
 
@@ -40,31 +41,14 @@ AGENT_MEMORY_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "save_event_to_long_term",
-            "description": "用于写入【中长篇且可能在未来检索复用】的事件记忆到长期向量库。适用于复杂排障过程、项目背景、阶段结论、关键决策记录。不要用于单句偏好（应使用 update_kv_profile），也不要用于显式实体关系（应使用 add_graph_memory）。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "event_description": {
-                        "type": "string",
-                        "description": "事件完整描述，建议包含背景-过程-结果-影响，保证脱离上下文也可理解；尽量避免只给关键词。"
-                    }
-                },
-                "required": ["event_description"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "add_graph_memory",
-            "description": "用于写入【明确的实体-关系-实体】图谱记忆。仅在关系可结构化表达时调用（如‘[当前用户] 喜欢 罗峰’、‘[当前用户] 负责 搜索模块’）。不要用于长段事件叙述（应使用 save_event_to_long_term），也不要用于全局偏好标签（应使用 update_kv_profile）。",
+            "description": "用于写入【当前用户 -> 目标实体】的单向图谱记忆。该工具只允许记录与当前用户相关的关系，不会反向改写原始剧情图关系。仅在关系可结构化表达时调用（如‘[当前用户] 喜欢 罗峰’、‘[当前用户] 负责 搜索模块’）。不要用于长段事件叙述（系统会自动做每轮对话记忆），也不要用于全局偏好标签（应使用 update_kv_profile）。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "source_entity": {
                         "type": "string",
-                        "description": "关系起点实体。若指用户本人，必须使用固定实体名 '[当前用户]'。"
+                        "description": "关系起点实体。必须为 '[当前用户]'。若传入其他值，系统会自动修正为 '[当前用户]'。"
                     },
                     "target_entity": {
                         "type": "string",
@@ -104,7 +88,7 @@ class MemoryManager:
 
         # 3. 初始化 Milvus 和 Embedding 模型
         self._ensure_milvus_db(settings.milvus_db_name)
-        self.milvus_collection_name = settings.milvus_event_collection
+        self.milvus_collection_name = settings.milvus_chat_memory_collection
         self.embedding_model = ModelFactory.get_embedding_model()
         self._init_milvus_collection()
 
@@ -144,18 +128,84 @@ class MemoryManager:
                 return val.strip()
         return ""
 
+    @staticmethod
+    def _normalize_summary_text(text: str) -> str:
+        """清洗模型输出，便于稳定判断“是否应跳过入库”。"""
+        if not text:
+            return ""
+        cleaned = text.strip()
+        # 去掉常见包裹符号（引号/反引号）
+        cleaned = cleaned.strip("\"'`“”‘’")
+        # 压缩多空白
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
+
+    @classmethod
+    def _should_skip_memory_summary(cls, summary: str) -> bool:
+        """判断摘要是否属于闲聊或空占位，需跳过入库。"""
+        normalized = cls._normalize_summary_text(summary)
+        if not normalized:
+            return True
+
+        lowered = normalized.lower()
+        empty_markers = {
+            "无",
+            "暂无",
+            "无内容",
+            "空",
+            "空字符串",
+            "none",
+            "null",
+            "n/a",
+            "na",
+            "skip",
+            "无有效信息",
+            "纯闲聊",
+        }
+        if lowered in empty_markers or normalized in empty_markers:
+            return True
+
+        # 兜底：若模型输出“这是闲聊，跳过”等说明性文本，也视为跳过
+        chitchat_hints = ("闲聊", "无需记录", "不需要记录", "跳过", "无长期记忆价值")
+        if any(hint in normalized for hint in chitchat_hints):
+            return True
+
+        return False
+
     def _init_milvus_collection(self):
-        """确保 Milvus 中存在长期事件记忆库"""
+        """确保 Milvus 中存在对话轮次记忆库。"""
+        expected_fields = [
+            "event_id",
+            "timestamp",
+            "user_query",
+            "ai_response",
+            "summary",
+            "dense_vector",
+        ]
+
+        if utility.has_collection(self.milvus_collection_name, using="default"):
+            existing = Collection(self.milvus_collection_name, using="default")
+            existing_fields = [f.name for f in existing.schema.fields]
+            if existing_fields != expected_fields:
+                raise RuntimeError(
+                    "Milvus 长期记忆集合字段与新架构不兼容。"
+                    f" 当前字段={existing_fields}，期望字段={expected_fields}。"
+                    "请清空或重建该集合后重试。"
+                )
+            self.event_collection = existing
+            return
+
         if not utility.has_collection(self.milvus_collection_name, using="default"):
             print(f"🛠️ 正在初始化专属长期记忆向量库: {self.milvus_collection_name}...")
             fields = [
                 FieldSchema(name="event_id", dtype=DataType.VARCHAR, is_primary=True, max_length=100),
                 FieldSchema(name="timestamp", dtype=DataType.INT64), # 记录记忆发生的时间戳
+                FieldSchema(name="user_query", dtype=DataType.VARCHAR, max_length=65535),
+                FieldSchema(name="ai_response", dtype=DataType.VARCHAR, max_length=65535),
                 FieldSchema(name="summary", dtype=DataType.VARCHAR, max_length=8192), # 【新增】存放高密度摘要
-                FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=65535), # 存放完整原文
                 FieldSchema(name="dense_vector", dtype=DataType.FLOAT_VECTOR, dim=settings.milvus_vector_dim)
             ]
-            schema = CollectionSchema(fields, description="Agentic 长期事件记忆库")
+            schema = CollectionSchema(fields, description="Agentic 对话轮次长期记忆库")
             collection = Collection(self.milvus_collection_name, schema, using="default")
             collection.create_index(
                 field_name="dense_vector", 
@@ -183,37 +233,42 @@ class MemoryManager:
             return f"更新档案失败: {e}"
 
     # ---------------------------------------------------------
-    # 工具 2: 长篇事件切块存入 Milvus
+    # 对话轮次自动记忆: 每轮用户问题 + AI回答 -> 摘要入 Milvus
     # ---------------------------------------------------------
-    def save_event_to_long_term(self, event_description: str) -> str:
-        """长文存入向量库：先生成摘要，再将摘要向量化，最后原文和摘要一并入库"""
+    def save_chat_turn_to_memory(self, rewritten_query: str, ai_response: str) -> str:
+        """将一轮对话静默压缩为长期记忆；闲聊轮次自动跳过。"""
         try:
-            if not event_description or not event_description.strip():
-                return "记录长期记忆失败: event_description 不能为空"
+            user_query = (rewritten_query or "").strip()
+            answer = (ai_response or "").strip()
+            if not user_query or not answer:
+                return "记录长期记忆失败: rewritten_query 或 ai_response 不能为空"
 
             event_id = f"evt_{uuid.uuid4().hex[:8]}"
             timestamp = int(time.time())
             
-            # 1. 调用大模型对长文本进行精炼总结 (使用便宜快速的小模型即可)
-            print("🧠 正在为长期记忆生成高密度摘要...")
+            print("🧠 正在为当前对话轮次生成记忆摘要...")
+            prompt = build_memory_event_summary_user_prompt(
+                max_chars=settings.memory_event_summary_max_chars,
+                user_query=user_query,
+                ai_response=answer,
+            )
             response = ModelFactory.chat_completion(
                 messages=[
                     {"role": "system", "content": MEMORY_EVENT_SUMMARY_SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": build_memory_event_summary_user_prompt(
-                            event_description=event_description,
-                            max_chars=settings.memory_event_summary_max_chars,
-                        ),
-                    },
+                    {"role": "user", "content": prompt},
                 ],
                 model_tier=settings.memory_event_summary_model_tier,
                 temperature=0.1,
             )
-            summary = self._extract_response_text(response) or "该事件暂无可提炼摘要。"
+            summary = self._extract_response_text(response)
+            normalized_summary = self._normalize_summary_text(summary)
+
+            # 闲聊轮次不入库
+            if self._should_skip_memory_summary(normalized_summary):
+                return "本轮判定为闲聊，无需写入长期记忆"
             
             # 2. 【核心优化】：仅对“摘要”进行向量化计算，大幅提高检索精准度
-            vector = self.embedding_model.encode([summary])[0]
+            vector = self.embedding_model.encode([normalized_summary])[0]
 
             if len(vector) != settings.milvus_vector_dim:
                 return (
@@ -221,23 +276,29 @@ class MemoryManager:
                     f"expected={settings.milvus_vector_dim}, got={len(vector)}"
                 )
             
-            # 3. 入库：同时保存摘要(用于可视化展示)和原文(用于召回给大模型阅读)
+            # 3. 入库：保存改写后的用户问题、AI回答与摘要
             self.event_collection.insert([
-                [event_id], [timestamp], [summary], [event_description], [vector]
+                [event_id], [timestamp], [user_query], [answer], [normalized_summary], [vector]
             ])
             self.event_collection.flush()
             
-            print(f"💾 [主动记忆]: 新长文事件已存入向量库 -> 摘要: {summary[:30]}...")
-            return f"成功将事件记录至长期记忆库，事件 ID: {event_id}"
+            print(f"💾 [自动记忆]: 对话轮次已存入向量库 -> 摘要: {normalized_summary[:30]}...")
+            return f"成功将对话轮次写入长期记忆库，事件 ID: {event_id}"
         except Exception as e:
-            return f"记录长期记忆失败: {e}"
+            return f"记录对话轮次记忆失败: {e}"
 
     # ---------------------------------------------------------
     # 工具 3: 将关系打入 Neo4j 图谱
     # ---------------------------------------------------------
     def add_graph_memory(self, source_entity: str, target_entity: str, relation: str) -> str:
-        """写入图数据库建立连接"""
+        """只写入 [当前用户] -> 目标实体 的单向记忆关系。"""
         try:
+            # 强制约束：仅允许当前用户作为关系起点
+            source = "[当前用户]"
+            target = (target_entity or "").strip()
+            if not target:
+                return "添加图谱记忆失败: target_entity 不能为空"
+
             # 安全处理：去除 relation 中的特殊字符，防止 Cypher 注入
             safe_rel = "".join(c for c in relation if c.isalnum() or c == "_")
             if not safe_rel:
@@ -245,21 +306,30 @@ class MemoryManager:
                 
             # 动态关系名称必须使用反引号 ` 包裹
             cypher = f"""
-            MERGE (n1:Entity {{id: $source}})
-            ON CREATE SET n1.type = 'User_Node', n1.description = 'Agentic Memory Entity'
+            MERGE (n1:UserMemory {{id: $source}})
+            ON CREATE SET n1.type = 'User_Node', n1.description = 'Current user memory node'
             
-            MERGE (n2:Entity {{id: $target}})
-            ON CREATE SET n2.type = 'User_Node', n2.description = 'Agentic Memory Entity'
+            OPTIONAL MATCH (n2e:Entity {{id: $target}})
+            OPTIONAL MATCH (n2m:MemoryEntity {{id: $target}})
+            WITH n1, coalesce(n2e, n2m) AS n2
+            CALL apoc.do.when(
+                n2 IS NULL,
+                'CREATE (x:MemoryEntity {{id: $target, type: "Memory_Entity", description: "Entity from user memory"}}) RETURN x AS node',
+                'RETURN n2 AS node',
+                {{target: $target, n2: n2}}
+            ) YIELD value
+            WITH n1, value.node AS n2
             
             MERGE (n1)-[r:`{safe_rel}`]->(n2)
             ON CREATE SET r.created_by = 'Agent_Memory'
+            ON CREATE SET r.source_chunk_ids = []
             RETURN r
             """
             with self.neo4j_driver.session() as session:
-                session.run(cypher, source=source_entity, target=target_entity)
+                session.run(cypher, source=source, target=target)
                 
-            print(f"💾 [主动记忆]: 图谱网络已更新 -> [{source_entity}] -({relation})-> [{target_entity}]")
-            return f"成功在知识图谱中建立连接: {source_entity} -> {target_entity}"
+            print(f"💾 [主动记忆]: 图谱网络已更新 -> [{source}] -({relation})-> [{target}]")
+            return f"成功在知识图谱中建立连接: {source} -> {target}"
         except Exception as e:
             return f"添加图谱记忆失败: {e}"
 

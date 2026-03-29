@@ -307,6 +307,7 @@ class CommunitySummarizer:
 
             edge_rows = session.run(
                 "MATCH (a:Entity)-[r]->(b:Entity) "
+                "WHERE coalesce(r.created_by, '') <> 'Agent_Memory' "
                 "RETURN a.id AS source, b.id AS target, type(r) AS relation, coalesce(r.description, '') AS description"
             )
             for row in edge_rows:

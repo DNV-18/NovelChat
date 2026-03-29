@@ -19,7 +19,7 @@ class RouteResult(BaseModel):
     reasoning: str = Field(..., description="简短的思考过程：为什么选择这个模式？代词指代了谁？")
     mode: Literal["LOCAL", "GLOBAL", "MEMORY", "DIRECT"] = Field(..., description="检索模式：LOCAL, GLOBAL, MEMORY 或 DIRECT")
     rewritten_query: str = Field(..., description="指代消解后、适合作为独立检索的搜索词")
-    entities: List[str] = Field(default_factory=list, description="提取出的核心实体列表（仅在 LOCAL 模式下需要）")
+    entities: List[str] = Field(default_factory=list, description="提取出的核心实体列表")
 
 class QueryRouter:
     """
