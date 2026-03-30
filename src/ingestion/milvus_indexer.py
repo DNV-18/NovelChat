@@ -10,6 +10,8 @@ from pymilvus import (
     CollectionSchema,
     DataType,
     Collection,
+    Function, 
+    FunctionType
 )
 
 from src.config import BASE_DIR, settings
@@ -64,10 +66,18 @@ class MilvusIndexer:
                         analyzer_params={"type": "chinese"}), # 使用中文分词器
             
             # 稠密向量字段
-            FieldSchema(name="dense_vector", dtype=DataType.FLOAT_VECTOR, dim=self.dim)
+            FieldSchema(name="dense_vector", dtype=DataType.FLOAT_VECTOR, dim=self.dim),
+            FieldSchema(name="sparse_vector", dtype=DataType.SPARSE_FLOAT_VECTOR)
         ]
 
-        schema = CollectionSchema(fields, description="小说混合检索底座 (Dense + BM25)")
+        bm25_function = Function(
+            name="text_bm25_emb",
+            input_field_names=["text"],
+            output_field_names=["sparse_vector"],
+            function_type=FunctionType.BM25,
+        )
+
+        schema = CollectionSchema(fields, functions=[bm25_function], description="小说混合检索底座 (Dense + BM25)",  enable_dynamic_field=True)
         self.collection = Collection(self.collection_name, schema)
 
         # 2. 为稠密向量创建 HNSW 索引 (查询速度极快)
@@ -83,7 +93,13 @@ class MilvusIndexer:
             "index_type": "INVERTED"
         }
         self.collection.create_index(field_name="text", index_params=text_index_params)
-        
+
+        sparse_index_params = {
+            "index_type": "SPARSE_INVERTED_INDEX",
+            "metric_type": "BM25"
+        }
+        self.collection.create_index(field_name="sparse_vector", index_params=sparse_index_params)
+
         print(f"✅ Milvus 集合 '{self.collection_name}' 创建成功，双路索引已就绪！")
 
     def insert_data(self, json_file_path: str, embedding_model, batch_size: int | None = None):
@@ -141,6 +157,10 @@ if __name__ == "__main__":
         raise FileNotFoundError(f"找不到待入库文件: {json_file}")
 
     embed_model = ModelFactory.get_embedding_model()
-    indexer = MilvusIndexer()
+    indexer = MilvusIndexer(
+            collection_name=settings.milvus_collection_name,
+            dim=settings.milvus_vector_dim,
+            milvus_uri=settings.milvus_uri,
+        )
     indexer.create_collection()
-    indexer.insert_data(str(json_file), embedding_model=embed_model)
+    indexer.insert_data(str(json_file), embedding_model=embed_model, batch_size=settings.milvus_insert_batch_size)

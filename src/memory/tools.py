@@ -2,6 +2,7 @@ import os
 import json
 import uuid
 import time
+import logging
 import re
 from neo4j import GraphDatabase
 from pymilvus import connections, db, utility, FieldSchema, CollectionSchema, DataType, Collection
@@ -12,6 +13,8 @@ from src.utils.prompts import (
     MEMORY_EVENT_SUMMARY_SYSTEM_PROMPT,
     build_memory_event_summary_user_prompt,
 )
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ==========================================
 # 1. 供 LLM 调用的 JSON Schema 定义 (OpenAI 格式)
@@ -103,30 +106,46 @@ class MemoryManager:
 
     @staticmethod
     def _extract_response_text(response) -> str:
-        """兼容提取 OpenAI 兼容响应中的文本。"""
+        """兼容提取 OpenAI 兼容响应中的文本，支持 content 为空时返回 reasoning。"""
         try:
             message = response.choices[0].message
         except Exception:
             return ""
 
+        # 1. 尝试提取标准的 content
         content = getattr(message, "content", None)
+        final_content = ""
+
         if isinstance(content, str):
-            return content.strip()
-        if isinstance(content, list):
+            final_content = content.strip()
+        elif isinstance(content, list):
             parts = []
             for item in content:
-                if isinstance(item, dict):
-                    txt = item.get("text", "")
-                else:
-                    txt = getattr(item, "text", "")
+                txt = item.get("text", "") if isinstance(item, dict) else getattr(item, "text", "")
                 if txt:
                     parts.append(str(txt))
-            return "".join(parts).strip()
+            final_content = "".join(parts).strip()
+
+        # 2. 如果 content 有内容，直接返回
+        if final_content:
+            return final_content
+
+        # 3. 如果 content 为空，尝试提取思考内容 (reasoning)
+        reasoning = ""
         for field in ("reasoning_content", "reasoning"):
             val = getattr(message, field, None)
             if isinstance(val, str) and val.strip():
-                return val.strip()
-        return ""
+                reasoning = val.strip()
+                break  # 找到第一个非空的推理字段就停止
+        
+        if reasoning:
+            # 截取前 100 个字符
+            short_reasoning = reasoning[:100]
+            logging.warning(f"大模型返回内容为空，失败原因: {response.choices[0].finish_reason} \n 思考内容：{short_reasoning}")
+            return "无内容"
+
+        # 4. 彻底没有任何内容
+        return "大模型返回内容为空，且无思考内容"
 
     @staticmethod
     def _normalize_summary_text(text: str) -> str:
@@ -171,6 +190,31 @@ class MemoryManager:
             return True
 
         return False
+
+    @staticmethod
+    def _dedupe_repeated_sentences(text: str) -> str:
+        """去除模型复读造成的重复句子，保持摘要紧凑可检索。"""
+        normalized = (text or "").strip()
+        if not normalized:
+            return ""
+
+        segments = [seg.strip() for seg in re.split(r"(?<=[。！？!?；;])", normalized) if seg.strip()]
+        if not segments:
+            return normalized
+
+        deduped = []
+        seen = set()
+        for seg in segments:
+            key = re.sub(r"\s+", "", seg)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(seg)
+            if len(deduped) >= 4:
+                break
+
+        merged = "".join(deduped).strip()
+        return merged or normalized
 
     def _init_milvus_collection(self):
         """确保 Milvus 中存在对话轮次记忆库。"""
@@ -292,8 +336,8 @@ class MemoryManager:
 
             event_id = f"evt_{uuid.uuid4().hex[:8]}"
             timestamp = int(time.time())
-            
-            print("🧠 正在为当前对话轮次生成记忆摘要...")
+
+            logging.debug("开始生成对话轮次记忆摘要")
             prompt = build_memory_event_summary_user_prompt(
                 max_chars=settings.memory_event_summary_max_chars,
                 user_query=user_query,
@@ -304,12 +348,14 @@ class MemoryManager:
                     {"role": "system", "content": MEMORY_EVENT_SUMMARY_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
+                max_tokens=settings.memory_event_summary_max_chars,
                 model_tier=settings.memory_event_summary_model_tier,
-                temperature=0.1,
+                temperature=0.0,
             )
             summary = self._extract_response_text(response)
             normalized_summary = self._normalize_summary_text(summary)
-
+            normalized_summary = self._dedupe_repeated_sentences(normalized_summary)
+            logging.debug("记忆摘要生成完成")
             # 闲聊轮次不入库
             if self._should_skip_memory_summary(normalized_summary):
                 return {
@@ -338,8 +384,8 @@ class MemoryManager:
                 [event_id], [timestamp], [user_query], [answer], [normalized_summary], [vector]
             ])
             self.event_collection.flush()
-            
-            print(f"💾 [自动记忆]: 对话轮次已存入向量库 -> 摘要: {normalized_summary[:30]}...")
+
+            logging.debug("对话轮次记忆入库完成")
             return {
                 "ok": True,
                 "event_id": event_id,
@@ -347,6 +393,7 @@ class MemoryManager:
                 "message": f"成功将对话轮次写入长期记忆库，事件 ID: {event_id}",
             }
         except Exception as e:
+            logging.error(f"⚠️ 记录对话轮次记忆失败: {e}")
             return {
                 "ok": False,
                 "event_id": "",
@@ -370,6 +417,7 @@ class MemoryManager:
             source = "[当前用户]"
             target = (target_entity or "").strip()
             if not target:
+                logging.error("⚠️ 添加图谱记忆失败: target_entity 不能为空")
                 return "添加图谱记忆失败: target_entity 不能为空"
 
             # 安全处理：去除 relation 中的特殊字符，防止 Cypher 注入
@@ -413,9 +461,10 @@ class MemoryManager:
                     memory_evidence_ref=(memory_evidence_ref or "").strip(),
                 )
                 
-            print(f"💾 [主动记忆]: 图谱网络已更新 -> [{source}] -({relation})-> [{target}]")
+            logging.info(f"💾 [主动记忆]: 图谱网络已更新 -> [{source}] -({relation})-> [{target}]")
             return f"成功在知识图谱中建立连接: {source} -> {target}"
         except Exception as e:
+            logging.error(f"⚠️ 添加图谱记忆失败: {e}")
             return f"添加图谱记忆失败: {e}"
 
     def close(self):
@@ -436,5 +485,6 @@ def get_current_kv_profile() -> str:
         
         lines = [f"- {k}: {v}" for k, v in profile.items()]
         return "\n".join(lines)
-    except Exception:
+    except Exception as e:
+        logging.error(f"⚠️ 读取用户档案失败: {e}")
         return "无法读取用户档案。"

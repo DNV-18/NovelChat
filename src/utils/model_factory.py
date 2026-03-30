@@ -277,32 +277,32 @@ if __name__ == "__main__":
     import json
     
     print("=" * 50)
-    print("测试 LLM 模型")
-    try:
-        response = ModelFactory.chat_completion(
-            messages=[{"role": "user", "content": "你好，请简单介绍一下你自己。"}],
-            model_tier="cheap",
-            max_tokens=16384,
-        )
-        print("LLM 响应对象:", response)
-        # print("LLM 思考过程:", response.choices[0].message.reasoning)
-        # print("LLM 响应:", response.choices[0].message.content)
-        # print("LLM 结束理由:", response.choices[0].finish_reason)
-        # print("LLM tokens 使用情况:", json.dumps(response.usage.model_dump(), indent=2))
-    except Exception as e:
-        print("LLM 请求失败:", e)
+    # print("测试 LLM 模型")
+    # try:
+    #     response = ModelFactory.chat_completion(
+    #         messages=[{"role": "user", "content": "你好，请简单介绍一下你自己。"}],
+    #         model_tier="cheap",
+    #         max_tokens=16384,
+    #     )
+    #     print("LLM 响应对象:", response)
+    #     # print("LLM 思考过程:", response.choices[0].message.reasoning)
+    #     # print("LLM 响应:", response.choices[0].message.content)
+    #     # print("LLM 结束理由:", response.choices[0].finish_reason)
+    #     # print("LLM tokens 使用情况:", json.dumps(response.usage.model_dump(), indent=2))
+    # except Exception as e:
+    #     print("LLM 请求失败:", e)
 
-    print("=" * 50)
-    print("测试 Embedding 模型")
-    try:
-        embed_model = ModelFactory.get_embedding_model()
-        vectors = embed_model.encode(["我爱北京天安门", "天安门上太阳升"])
-        print("向量维度:", len(vectors[0]))
-        print("第一条前5个维度的值:", vectors[0][:5])
-    except Exception as e:
-        print("Embedding 请求失败:", e)
+    # print("=" * 50)
+    # print("测试 Embedding 模型")
+    # try:
+    #     embed_model = ModelFactory.get_embedding_model()
+    #     vectors = embed_model.encode(["我爱北京天安门", "天安门上太阳升"])
+    #     print("向量维度:", len(vectors[0]))
+    #     print("第一条前5个维度的值:", vectors[0][:5])
+    # except Exception as e:
+    #     print("Embedding 请求失败:", e)
 
-    print("=" * 50)
+    # print("=" * 50)
     print("测试 Reranker 模型")
     try:
         reranker = ModelFactory.get_reranker_model()

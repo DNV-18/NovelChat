@@ -70,7 +70,7 @@ class HybridRetriever:
         process_results(dense_results)
         process_results(sparse_results)
         if graph_results:
-            process_results(graph_results) # 将图谱召回的切片同样加入 RRF 擂台！
+            process_results(graph_results, weight=2.0) # 将图谱召回的切片同样加入 RRF 擂台！
 
         # 按 RRF 分数倒序排序
         sorted_cids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
@@ -82,6 +82,33 @@ class HybridRetriever:
             return float(score)
         except Exception:
             return 0.0
+
+    def _encode_query_vector(self, text: str) -> List[float]:
+        """兼容 APIEmbeddingModel.encode 返回的 Python 列表结构。"""
+        vectors = self.embedding_model.encode([text])
+        if not vectors:
+            raise ValueError("Embedding 返回为空")
+        return vectors[0]
+
+    def _neo4j_label_exists(self, label: str) -> bool:
+        """检查 Neo4j 中标签是否存在，避免不存在标签时触发告警日志。"""
+        try:
+            with self.neo4j_driver.session() as session:
+                rows = session.run("CALL db.labels() YIELD label RETURN label")
+                labels = {row["label"] for row in rows}
+                return label in labels
+        except Exception:
+            return False
+
+    def _neo4j_property_key_exists(self, key: str) -> bool:
+        """检查 Neo4j 中属性键是否存在，避免引用不存在属性键触发告警。"""
+        try:
+            with self.neo4j_driver.session() as session:
+                rows = session.run("CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey")
+                keys = {row["propertyKey"] for row in rows}
+                return key in keys
+        except Exception:
+            return False
 
     @staticmethod
     def _extract_keywords(query: str, max_keywords: int = 6) -> List[str]:
@@ -138,7 +165,7 @@ class HybridRetriever:
         output_fields: List[str],
         search_limit: int,
     ) -> List[Dict]:
-        """基于 Milvus Full-Text(BM25) 执行稀疏召回。"""
+        """基于 Milvus BM25 执行稀疏召回：优先 sparse_vector，失败时回退 TEXT_MATCH。"""
         if not keywords:
             return []
 
@@ -146,34 +173,61 @@ class HybridRetriever:
         if not search_data.strip():
             return []
 
+        limit = max(1, search_limit)
+        has_sparse_vector = any(getattr(f, "name", "") == "sparse_vector" for f in collection.schema.fields)
+
+        if has_sparse_vector:
+            try:
+                search_res = collection.search(
+                    data=[search_data],
+                    anns_field="sparse_vector",
+                    param={"metric_type": "BM25"},
+                    limit=limit,
+                    output_fields=output_fields,
+                )
+
+                merged = []
+                for hit in search_res[0]:
+                    row = {}
+                    row_id = None
+                    if hasattr(hit, "entity"):
+                        row_id = hit.entity.get(id_field)
+                        row["sparse_score"] = hit.score
+                        for field in output_fields:
+                            row[field] = hit.entity.get(field)
+
+                    if row_id is None:
+                        row_id = str(getattr(hit, "id", ""))
+
+                    if not row_id:
+                        continue
+
+                    row[id_field] = row_id
+                    merged.append(row)
+
+                return merged
+            except Exception as e:
+                logging.warning("⚠️ [Sparse-BM25] sparse_vector 检索失败，query='%s', error=%s", search_data, e)
+
+        # 回退到 TEXT_MATCH，兼容未建 sparse_vector 的集合。
+        escaped = search_data.replace("'", "\\'")
+        expr = f"TEXT_MATCH({text_field}, '{escaped}')"
         try:
-            search_res = collection.search(
-                data=[search_data],
-                anns_field=text_field,
-                param={"metric_type": "BM25"},
-                limit=max(1, search_limit),
+            rows = collection.query(
+                expr=expr,
+                limit=limit,
                 output_fields=output_fields,
             )
         except Exception as e:
-            logging.warning("⚠️ [Sparse-BM25] 检索失败，query='%s', error=%s", search_data, e)
+            logging.warning("⚠️ [Sparse-BM25] TEXT_MATCH 检索失败，query='%s', error=%s", search_data, e)
             return []
 
         merged = []
-        for hit in search_res[0]:
-            row = {}
-            row_id = None
-            if hasattr(hit, "entity"):
-                row_id = hit.entity.get(id_field)
-                row["sparse_score"] = hit.score
-                for field in output_fields:
-                    row[field] = hit.entity.get(field)
-
-            if row_id is None:
-                row_id = str(getattr(hit, "id", ""))
-
+        for item in rows:
+            row_id = item.get(id_field)
             if not row_id:
                 continue
-
+            row = {field: item.get(field) for field in output_fields}
             row[id_field] = row_id
             merged.append(row)
 
@@ -200,15 +254,26 @@ class HybridRetriever:
             return []
         
         # 1) 常规实体边：取原著 chunk 证据
-        base_cypher = """
-        UNWIND $entities AS ent_name
-        MATCH (n:Entity {id: ent_name})-[r]-(m:Entity)
-        WHERE coalesce(r.created_by, '') <> 'Agent_Memory'
-        UNWIND r.source_chunk_ids AS chunk_id
-        RETURN chunk_id, count(chunk_id) AS freq
-        ORDER BY freq DESC
-        LIMIT 60
-        """
+        # 若存在 created_by 属性键，则排除 Agent_Memory 边；不存在则退化为不过滤（避免告警）。
+        if self._neo4j_property_key_exists("created_by"):
+            base_cypher = """
+            UNWIND $entities AS ent_name
+            MATCH (n:Entity {id: ent_name})-[r]-(m:Entity)
+            WHERE coalesce(r.created_by, '') <> 'Agent_Memory'
+            UNWIND r.source_chunk_ids AS chunk_id
+            RETURN chunk_id, count(chunk_id) AS freq
+            ORDER BY freq DESC
+            LIMIT 60
+            """
+        else:
+            base_cypher = """
+            UNWIND $entities AS ent_name
+            MATCH (n:Entity {id: ent_name})-[r]-(m:Entity)
+            UNWIND r.source_chunk_ids AS chunk_id
+            RETURN chunk_id, count(chunk_id) AS freq
+            ORDER BY freq DESC
+            LIMIT 60
+            """
 
         chunk_ids: List[str] = []
         with self.neo4j_driver.session() as session:
@@ -242,13 +307,25 @@ class HybridRetriever:
 
     def _retrieve_user_graph_memory_summaries(self, rewritten_query: str, top_k: int = 5) -> List[str]:
         """从“当前用户”出发的 Agent_Memory 边中拿证据池，再在记忆库内语义召回 Top-K（不参与 RRF/精排）。"""
+        if not self._neo4j_label_exists("UserMemory"):
+            return []
+        if not self._neo4j_property_key_exists("memory_evidence_refs"):
+            return []
+
         memory_event_ids: List[str] = []
-        cypher = """
-        MATCH (u:UserMemory {id: '[当前用户]'})-[r]->()
-        WHERE coalesce(r.created_by, '') = 'Agent_Memory'
-        UNWIND coalesce(r.memory_evidence_refs, []) AS mem_evt
-        RETURN mem_evt
-        """
+        if self._neo4j_property_key_exists("created_by"):
+            cypher = """
+            MATCH (u:UserMemory {id: '[当前用户]'})-[r]->()
+            WHERE coalesce(r.created_by, '') = 'Agent_Memory'
+            UNWIND coalesce(r.memory_evidence_refs, []) AS mem_evt
+            RETURN mem_evt
+            """
+        else:
+            cypher = """
+            MATCH (u:UserMemory {id: '[当前用户]'})-[r]->()
+            UNWIND coalesce(r.memory_evidence_refs, []) AS mem_evt
+            RETURN mem_evt
+            """
         with self.neo4j_driver.session() as session:
             rows = session.run(cypher)
             for row in rows:
@@ -260,7 +337,7 @@ class HybridRetriever:
         if not memory_event_ids:
             return []
 
-        query_vector = self.embedding_model.encode([rewritten_query], normalize_embeddings=True).tolist()[0]
+        query_vector = self._encode_query_vector(rewritten_query)
         expr = "event_id in [" + ",".join([f"'{eid}'" for eid in memory_event_ids]) + "]"
 
         try:
@@ -301,7 +378,7 @@ class HybridRetriever:
         logging.info("🔍 [LOCAL 模式] 正在进行三路召回与重排...")
         
         # 1. 语义向量召回 (Dense)
-        query_vector = self.embedding_model.encode([query], normalize_embeddings=True).tolist()[0]
+        query_vector = self._encode_query_vector(query)
         dense_req = self.chunk_collection.search(
             data=[query_vector],
             anns_field="dense_vector",
@@ -386,7 +463,7 @@ class HybridRetriever:
             return []
 
         logging.info("🧠 [MEMORY 模式] 正在召回用户历史对话记忆...")
-        query_vector = self.embedding_model.encode([query], normalize_embeddings=True).tolist()[0]
+        query_vector = self._encode_query_vector(query)
 
         dense_req = self.memory_collection.search(
             data=[query_vector],
@@ -456,7 +533,7 @@ class HybridRetriever:
         直接做 Dense 召回，它与原文切片维度不同，不参与微观切片的 RRF。
         """
         logging.info("🔭 [GLOBAL 模式] 正在检索全局社区摘要...")
-        query_vector = self.embedding_model.encode([query], normalize_embeddings=True).tolist()[0]
+        query_vector = self._encode_query_vector(query)
         
         search_res = self.summary_collection.search(
             data=[query_vector],

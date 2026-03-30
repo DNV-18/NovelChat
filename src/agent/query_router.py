@@ -51,6 +51,7 @@ class QueryRouter:
         """
         核心路由判定方法
         """
+        logging.info(f"🚦 正在路由用户请求...")
         history_text = ""
         if chat_history:
             # 【优化点2】：优化历史记录的拼接格式，使得大模型更容易理解对话上下文
@@ -72,7 +73,6 @@ class QueryRouter:
                 temperature=0.0,
                 max_tokens=16248,
                 extra_body={"response_format": {"type": "json_object"}},
-                enable_thinking=False,
             )
 
             raw_json_str = response.choices[0].message.content
@@ -82,7 +82,8 @@ class QueryRouter:
             result_dict = json.loads(raw_json_str)
             
             route_result = RouteResult(**result_dict)
-            logging.info(f"🚦 路由判定 -> 模式: [{route_result.mode}], 实体: {route_result.entities}")
+            logging.info(f"🚦 路由原因: {route_result.reasoning}")
+            logging.info(f"🚦 路由判定 -> 模式: [{route_result.mode}], 改写后: {route_result.rewritten_query}, 实体: {route_result.entities}")
             return route_result
             
         except Exception as e:

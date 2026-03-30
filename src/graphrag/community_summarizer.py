@@ -140,10 +140,13 @@ class CommunitySummarizer:
                 ig_graph.es["weight"] = weights
 
             # 2) Leiden 分区
+            current_resolution = 6.4 if level == 0 else 1.0
+
             partition = leidenalg.find_partition(
                 ig_graph,
-                leidenalg.ModularityVertexPartition,
+                leidenalg.RBConfigurationVertexPartition,
                 weights=ig_graph.es["weight"] if ig_graph.ecount() > 0 else None,
+                resolution_parameter=current_resolution
             )
 
             # 3) 记录当前层社区
@@ -221,7 +224,7 @@ class CommunitySummarizer:
                     ],
                     model_tier=settings.community_summary_model_tier,
                     temperature=0.2,
-                    max_tokens=10240,
+                    max_tokens=1024,
                 )
 
             message = response.choices[0].message
@@ -238,7 +241,8 @@ class CommunitySummarizer:
 
             return text or "该社区暂无稳定可总结信息。"
         except Exception as e:
-            return f"摘要生成失败：{e}"
+            print(f"⚠️ 社区摘要生成失败(level={level}): {e}")
+            return "该社区摘要暂不可用。"
 
     async def _summarize_level_parallel(
         self,
@@ -246,7 +250,7 @@ class CommunitySummarizer:
         jobs: list,
         community_pbar,
     ) -> list:
-        """在同一层内并发生成社区摘要，层与层之间由外层循环保证串行。"""
+        """在同一层内并发生成社区摘要，具体并发由 semaphore 控制。"""
         async def _worker(job: dict):
             summary_text = await self._generate_summary(level, job["summary_input"])
             return {

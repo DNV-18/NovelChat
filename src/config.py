@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     context_inject_model_tier: str = Field("cheap", description="上下文注入使用的模型层级")
     graph_extract_model_tier: str = Field("cheap", description="实体关系抽取使用的模型层级")
     community_summary_model_tier: str = Field("cheap", description="社区摘要生成使用的模型层级")
+    community_summary_max_concurrency: int = Field(4, description="社区摘要同层并发上限")
 
     # Tokenizer 配置
     local_tokenizer_path: str = Field("/home/dnv/models/Qwen3.5-27B", description="本地 tokenizer 目录")
@@ -81,7 +82,7 @@ class Settings(BaseSettings):
     )
     # 每轮对话自动记忆在 Milvus 中的专属 Collection
     milvus_chat_memory_collection: str = Field("chat_turn_memories", description="对话轮次记忆集合名称")
-    memory_event_summary_max_chars: int = Field(10000, description="对话摘要最大字数")
+    memory_event_summary_max_chars: int = Field(12000, description="对话摘要最大字数")
     memory_event_summary_model_tier: str = Field("smart", description="对话摘要使用的模型层级")
 
     # ==========================================
@@ -99,7 +100,7 @@ class Settings(BaseSettings):
     memory_summary_top_k: int = Field(2, description="MEMORY 模式返回的记忆摘要数量")
     memory_detail_chunk_top_k: int = Field(4, description="MEMORY 模式补充的原著切片数量")
     user_graph_memory_top_k: int = Field(2, description="命中当前用户实体时，从图谱证据池语义召回的记忆摘要数量")
-    rerank_threshold: float = Field(0.1, description="Cross-Encoder 精排绝对阈值，低于该分数的结果将被剔除")
+    rerank_threshold: float = Field(0.70, description="Cross-Encoder 精排绝对阈值，低于该分数的结果将被剔除")
 
     # 声明从哪读取环境变量
     model_config = SettingsConfigDict(

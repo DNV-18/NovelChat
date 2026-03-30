@@ -48,22 +48,21 @@ class GraphRAGPipeline:
         # ---------------------------------------------------------
         # Step 1: 实体与关系提取 (Graph Extraction)
         # ---------------------------------------------------------
-        print("\n🕸️ [Step 1] 开始从微观 Chunk 中提取实体与拓扑网...")
-        extractor = GraphExtractor(
-            neo4j_uri=settings.neo4j_uri,
-            neo4j_user=neo4j_user,
-            neo4j_pwd=neo4j_pwd,
-        )
+        # print("\n🕸️ [Step 1] 开始从微观 Chunk 中提取实体与拓扑网...")
+        # extractor = GraphExtractor(
+        #     neo4j_uri=settings.neo4j_uri,
+        #     neo4j_user=neo4j_user,
+        #     neo4j_pwd=neo4j_pwd,
+        # )
         
-        try:
-            # 这里的 process_all_chunks 需要 Copilot 帮你补全异步读取 JSON 并发请求的逻辑
-            await extractor.process_all_chunks(str(self.input_file))
-        except Exception as e:
-            print(f"❌ 实体提取阶段发生错误: {e}")
-            raise e
-        finally:
-            extractor.close()
-            print("✅ 实体提取完毕，底层知识图谱已写入 Neo4j！")
+        # try:
+        #     await extractor.process_all_chunks(str(self.input_file))
+        # except Exception as e:
+        #     print(f"❌ 实体提取阶段发生错误: {e}")
+        #     raise e
+        # finally:
+        #     extractor.close()
+        #     print("✅ 实体提取完毕，底层知识图谱已写入 Neo4j！")
 
         # ---------------------------------------------------------
         # Step 2: 层次化社区划分与摘要生成 (Community Summarization)
@@ -74,7 +73,8 @@ class GraphRAGPipeline:
             neo4j_user=neo4j_user,
             neo4j_pwd=neo4j_pwd,
             embedding_model=embedding_model,
-            milvus_uri=settings.milvus_uri
+            milvus_uri=settings.milvus_uri,
+            summary_max_concurrency=settings.community_summary_max_concurrency,
         )
         
         try:
