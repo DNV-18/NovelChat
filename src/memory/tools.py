@@ -21,7 +21,7 @@ AGENT_MEMORY_TOOLS = [
         "type": "function",
         "function": {
             "name": "update_kv_profile",
-            "description": "用于写入【稳定且长期有效】的用户设定到 KV 档案。仅在用户明确表达固定偏好/硬性约束时调用（如称呼、语言、禁忌、角色设定）。不要用于一次性任务进展、临时情绪或可过期事实。每次调用只写一条 key-value。",
+            "description": "用于写入【稳定且长期有效】的用户偏好与硬约束到 KV 档案（最高优先级，后续轮次持续生效）。仅在用户明确给出长期规则时调用：称呼偏好、回答语言、禁忌、固定角色设定、长期口味。不要用于普通事实、一次性任务进展、临时情绪或可过期信息。每次调用只写一条 key-value。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -42,7 +42,7 @@ AGENT_MEMORY_TOOLS = [
         "type": "function",
         "function": {
             "name": "add_graph_memory",
-            "description": "用于写入【当前用户 -> 目标实体】的单向图谱记忆。该工具只允许记录与当前用户相关的关系，不会反向改写原始剧情图关系。仅在关系可结构化表达时调用（如‘[当前用户] 喜欢 罗峰’、‘[当前用户] 负责 搜索模块’）。不要用于长段事件叙述（系统会自动做每轮对话记忆），也不要用于全局偏好标签（应使用 update_kv_profile）。",
+            "description": "用于写入【当前用户 -> 目标实体】的关系型记忆（普通相关记忆，不是硬性偏好）。仅在可结构化成关系三元组时调用：如‘[当前用户] 喜欢 罗峰’、‘[当前用户] 负责 搜索模块’。不要用于长期硬约束偏好（应使用 update_kv_profile）。系统会自动为每轮对话生成摘要并写入向量库，且由后端自动把事件 ID 绑定为图关系证据；本工具只负责关系三元组本身。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -232,16 +232,63 @@ class MemoryManager:
         except Exception as e:
             return f"更新档案失败: {e}"
 
+    def clear_kv_profile(self) -> str:
+        """清空本地 KV 档案。"""
+        try:
+            with open(self.kv_path, 'w', encoding='utf-8') as f:
+                json.dump({}, f, ensure_ascii=False, indent=2)
+            return "成功清空 KV Profile。"
+        except Exception as e:
+            return f"清空 KV Profile 失败: {e}"
+
+    def clear_user_graph_and_memory_db(self) -> str:
+        """清理 [当前用户] 出发的图谱边，并重建记忆摘要库。"""
+        try:
+            deleted_edges = 0
+            cypher = """
+            MATCH (:UserMemory {id: '[当前用户]'})-[r]->()
+            WITH collect(r) AS rels
+            FOREACH (rel IN rels | DELETE rel)
+            RETURN size(rels) AS deleted_edges
+            """
+            with self.neo4j_driver.session() as session:
+                row = session.run(cypher).single()
+                deleted_edges = int(row["deleted_edges"] or 0) if row else 0
+
+            if utility.has_collection(self.milvus_collection_name, using="default"):
+                utility.drop_collection(self.milvus_collection_name, using="default")
+
+            # 立即重建集合，保证当前进程和下次启动都不会出现“集合不存在”。
+            self._init_milvus_collection()
+
+            return (
+                f"成功清理用户图谱记忆：删除边 {deleted_edges} 条；"
+                f"并已重建记忆摘要集合 {self.milvus_collection_name}。"
+            )
+        except Exception as e:
+            return f"清理用户图谱记忆/记忆摘要库失败: {e}"
+
+    def clear_all_memories(self) -> str:
+        """同时清空 KV 档案与用户图谱/记忆摘要库。"""
+        kv_msg = self.clear_kv_profile()
+        db_msg = self.clear_user_graph_and_memory_db()
+        return f"{kv_msg} | {db_msg}"
+
     # ---------------------------------------------------------
     # 对话轮次自动记忆: 每轮用户问题 + AI回答 -> 摘要入 Milvus
     # ---------------------------------------------------------
-    def save_chat_turn_to_memory(self, rewritten_query: str, ai_response: str) -> str:
-        """将一轮对话静默压缩为长期记忆；闲聊轮次自动跳过。"""
+    def save_chat_turn_to_memory_record(self, rewritten_query: str, ai_response: str) -> dict:
+        """将一轮对话写入长期记忆，并返回结构化结果（含 event_id）。"""
         try:
             user_query = (rewritten_query or "").strip()
             answer = (ai_response or "").strip()
             if not user_query or not answer:
-                return "记录长期记忆失败: rewritten_query 或 ai_response 不能为空"
+                return {
+                    "ok": False,
+                    "event_id": "",
+                    "summary": "",
+                    "message": "记录长期记忆失败: rewritten_query 或 ai_response 不能为空",
+                }
 
             event_id = f"evt_{uuid.uuid4().hex[:8]}"
             timestamp = int(time.time())
@@ -265,16 +312,26 @@ class MemoryManager:
 
             # 闲聊轮次不入库
             if self._should_skip_memory_summary(normalized_summary):
-                return "本轮判定为闲聊，无需写入长期记忆"
+                return {
+                    "ok": True,
+                    "event_id": "",
+                    "summary": normalized_summary,
+                    "message": "本轮判定为闲聊，无需写入长期记忆",
+                }
             
             # 2. 【核心优化】：仅对“摘要”进行向量化计算，大幅提高检索精准度
             vector = self.embedding_model.encode([normalized_summary])[0]
 
             if len(vector) != settings.milvus_vector_dim:
-                return (
-                    "记录长期记忆失败: 向量维度不匹配, "
-                    f"expected={settings.milvus_vector_dim}, got={len(vector)}"
-                )
+                return {
+                    "ok": False,
+                    "event_id": "",
+                    "summary": normalized_summary,
+                    "message": (
+                        "记录长期记忆失败: 向量维度不匹配, "
+                        f"expected={settings.milvus_vector_dim}, got={len(vector)}"
+                    ),
+                }
             
             # 3. 入库：保存改写后的用户问题、AI回答与摘要
             self.event_collection.insert([
@@ -283,14 +340,30 @@ class MemoryManager:
             self.event_collection.flush()
             
             print(f"💾 [自动记忆]: 对话轮次已存入向量库 -> 摘要: {normalized_summary[:30]}...")
-            return f"成功将对话轮次写入长期记忆库，事件 ID: {event_id}"
+            return {
+                "ok": True,
+                "event_id": event_id,
+                "summary": normalized_summary,
+                "message": f"成功将对话轮次写入长期记忆库，事件 ID: {event_id}",
+            }
         except Exception as e:
-            return f"记录对话轮次记忆失败: {e}"
+            return {
+                "ok": False,
+                "event_id": "",
+                "summary": "",
+                "message": f"记录对话轮次记忆失败: {e}",
+            }
 
     # ---------------------------------------------------------
     # 工具 3: 将关系打入 Neo4j 图谱
     # ---------------------------------------------------------
-    def add_graph_memory(self, source_entity: str, target_entity: str, relation: str) -> str:
+    def add_graph_memory(
+        self,
+        source_entity: str,
+        target_entity: str,
+        relation: str,
+        memory_evidence_ref: str | None = None,
+    ) -> str:
         """只写入 [当前用户] -> 目标实体 的单向记忆关系。"""
         try:
             # 强制约束：仅允许当前用户作为关系起点
@@ -322,11 +395,23 @@ class MemoryManager:
             
             MERGE (n1)-[r:`{safe_rel}`]->(n2)
             ON CREATE SET r.created_by = 'Agent_Memory'
-            ON CREATE SET r.source_chunk_ids = []
+            ON CREATE SET r.memory_evidence_refs = []
+            WITH r
+            REMOVE r.source_chunk_ids
+            SET r.memory_evidence_refs = CASE
+                WHEN $memory_evidence_ref IS NULL OR $memory_evidence_ref = '' THEN coalesce(r.memory_evidence_refs, [])
+                WHEN $memory_evidence_ref IN coalesce(r.memory_evidence_refs, []) THEN coalesce(r.memory_evidence_refs, [])
+                ELSE coalesce(r.memory_evidence_refs, []) + $memory_evidence_ref
+            END
             RETURN r
             """
             with self.neo4j_driver.session() as session:
-                session.run(cypher, source=source, target=target)
+                session.run(
+                    cypher,
+                    source=source,
+                    target=target,
+                    memory_evidence_ref=(memory_evidence_ref or "").strip(),
+                )
                 
             print(f"💾 [主动记忆]: 图谱网络已更新 -> [{source}] -({relation})-> [{target}]")
             return f"成功在知识图谱中建立连接: {source} -> {target}"

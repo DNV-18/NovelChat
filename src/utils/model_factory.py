@@ -136,6 +136,9 @@ class ModelFactory:
         max_tokens: int = 16384,
         extra_body: Dict[str, Any] | None = None,
         enable_thinking: bool | None = None,
+        tools: List[Dict[str, Any]] | None = None,
+        tool_choice: Any = None,
+        **kwargs: Any,
     ) -> Any:
         """
         统一同步 Chat Completions 调用入口。
@@ -149,13 +152,21 @@ class ModelFactory:
         )
 
         client = cls.get_llm()
-        return client.chat.completions.create(
-            model=resolved_model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            extra_body=resolved_extra_body,
-        )
+        request_payload: Dict[str, Any] = {
+            "model": resolved_model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "extra_body": resolved_extra_body,
+        }
+        if tools is not None:
+            request_payload["tools"] = tools
+        if tool_choice is not None:
+            request_payload["tool_choice"] = tool_choice
+        if kwargs:
+            request_payload.update(kwargs)
+
+        return client.chat.completions.create(**request_payload)
 
     @classmethod
     def get_async_llm(cls) -> Any:
@@ -182,6 +193,9 @@ class ModelFactory:
         max_tokens: int = 16384,
         extra_body: Dict[str, Any] | None = None,
         enable_thinking: bool | None = None,
+        tools: List[Dict[str, Any]] | None = None,
+        tool_choice: Any = None,
+        **kwargs: Any,
     ) -> Any:
         """
         统一异步 Chat Completions 调用入口。
@@ -195,13 +209,21 @@ class ModelFactory:
         )
 
         client = cls.get_async_llm()
-        return await client.chat.completions.create(
-            model=resolved_model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            extra_body=resolved_extra_body,
-        )
+        request_payload: Dict[str, Any] = {
+            "model": resolved_model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "extra_body": resolved_extra_body,
+        }
+        if tools is not None:
+            request_payload["tools"] = tools
+        if tool_choice is not None:
+            request_payload["tool_choice"] = tool_choice
+        if kwargs:
+            request_payload.update(kwargs)
+
+        return await client.chat.completions.create(**request_payload)
 
 
     @classmethod

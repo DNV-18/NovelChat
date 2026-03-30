@@ -43,6 +43,10 @@ class CommunitySummarizer:
         self.summary_collection_name = settings.milvus_community_summary_collection
         self._init_milvus_collection()
 
+    def close(self):
+        """释放 Neo4j 连接。"""
+        self.driver.close()
+
     def _ensure_milvus_db(self, db_name: str):
         """确保目标 Milvus 数据库存在，不存在则自动创建。"""
         connections.connect("default", uri=self._milvus_uri)

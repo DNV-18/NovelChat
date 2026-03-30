@@ -84,7 +84,7 @@ class GraphRAGPipeline:
             print(f"❌ 社区摘要生成阶段发生错误: {e}")
             raise e
         finally:
-            summarizer.driver.close()
+            summarizer.close()
             print("✅ 社区抽象完毕，图谱垂直树与全局摘要向量已构建！")
 
         print("\n" + "="*50)

@@ -87,12 +87,18 @@ class Settings(BaseSettings):
     # ==========================================
     # ⚙️ 5. 系统运行参数
     # ==========================================
+    main_agent_model_tier: str = Field("smart", description="主对话 Agent 使用的模型层级")
     query_router_model_tier: str = Field("smart", description="Query Router 使用的模型层级")
-    query_router_history_turns: int = Field(3, description="Query Router 参与判定的最近历史轮数")
+    query_router_history_turns: int = Field(2, description="Query Router 参与判定的最近历史轮数")
     max_retries: int = Field(3, description="API 请求失败重试次数")
     rrf_k: int = Field(60, description="RRF (倒数秩融合) 的平滑常数 k")
     top_k_retrieval: int = Field(60, description="单路召回的初始 Chunk 数量")
     top_k_rerank: int = Field(6, description="Cross-Encoder 精排后最终喂给大模型的 Chunk 数量")
+    global_summary_top_k: int = Field(3, description="GLOBAL 模式宏观摘要召回数量")
+    global_detail_chunk_top_k: int = Field(3, description="GLOBAL 模式微观细节补充切片数量")
+    memory_summary_top_k: int = Field(2, description="MEMORY 模式返回的记忆摘要数量")
+    memory_detail_chunk_top_k: int = Field(4, description="MEMORY 模式补充的原著切片数量")
+    user_graph_memory_top_k: int = Field(2, description="命中当前用户实体时，从图谱证据池语义召回的记忆摘要数量")
     rerank_threshold: float = Field(0.1, description="Cross-Encoder 精排绝对阈值，低于该分数的结果将被剔除")
 
     # 声明从哪读取环境变量

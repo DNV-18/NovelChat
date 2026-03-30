@@ -107,7 +107,7 @@ class HybridRetriever:
 
         for ent in entities or []:
             token = (ent or "").strip()
-            if not token or token == "当前用户":
+            if not token or token in {"当前用户", "[当前用户]"}:
                 continue
             if token in seen:
                 continue
@@ -181,16 +181,26 @@ class HybridRetriever:
 
     def _get_graph_chunks(self, entities: List[str]) -> List[Dict]:
         """
-        【核心逻辑】：从 Neo4j 中查找涉及指定实体的边，提取 source_chunk_ids，
-        然后去 Milvus 中把对应的原文拉出来。
+        【核心逻辑】：仅从实体图谱关系中召回原著切片证据（参与 RRF）。
+        注意：不读取 Agent_Memory 的 memory_evidence_refs。
         """
         if not entities:
             return []
             
         logging.info(f"🕸️ [图谱轨道] 正在 Neo4j 中探索实体: {entities}")
+
+        # 当前用户节点不属于 Entity，需从图实体检索列表中排除
+        normalized_entities = []
+        for e in entities:
+            token = (e or "").strip()
+            if not token or token in {"当前用户", "[当前用户]"}:
+                continue
+            normalized_entities.append(token)
+        if not normalized_entities:
+            return []
         
-        # 1. 使用 Cypher 查出图谱中与这些实体相关的原切片 ID
-        cypher = """
+        # 1) 常规实体边：取原著 chunk 证据
+        base_cypher = """
         UNWIND $entities AS ent_name
         MATCH (n:Entity {id: ent_name})-[r]-(m:Entity)
         WHERE coalesce(r.created_by, '') <> 'Agent_Memory'
@@ -199,34 +209,89 @@ class HybridRetriever:
         ORDER BY freq DESC
         LIMIT 60
         """
-        
-        chunk_ids = []
+
+        chunk_ids: List[str] = []
         with self.neo4j_driver.session() as session:
-            result = session.run(cypher, entities=entities)
+            result = session.run(base_cypher, entities=normalized_entities)
             for record in result:
                 if record["chunk_id"]:
                     chunk_ids.append(record["chunk_id"])
 
+        # 去重并保序
+        chunk_ids = list(dict.fromkeys(chunk_ids))
+
         if not chunk_ids:
             return []
 
-        # 2. 根据找出的 chunk_ids，去 Milvus 反查原文文本
-        # 注意 expr 的语法: chunk_id in ["chunk_01", "chunk_02"]
-        query_res = self.chunk_collection.query(
-            expr=f"chunk_id in {chunk_ids}",
-            output_fields=["chunk_id", "text", "pian", "ji", "zhang"]
-        )
-        
-        # 为了保证 RRF 中 rank 的顺序（图谱中连接越紧密的排越前）
-        # 我们按照 Neo4j 返回的频率顺序来重新排列查出来的文本
-        text_map = {hit["chunk_id"]: hit["text"] for hit in query_res}
+        # 2) 去 Milvus 反查原著证据文本
+        chunk_text_map: Dict[str, str] = {}
+        if chunk_ids:
+            chunk_expr = "[" + ",".join([f"'{cid}'" for cid in chunk_ids]) + "]"
+            query_res = self.chunk_collection.query(
+                expr=f"chunk_id in {chunk_expr}",
+                output_fields=["chunk_id", "text", "pian", "ji", "zhang"],
+            )
+            chunk_text_map = {hit["chunk_id"]: hit.get("text", "") for hit in query_res}
         
         graph_results = []
         for cid in chunk_ids:
-            if cid in text_map:
-                graph_results.append({"chunk_id": cid, "text": text_map[cid]})
+            if cid in chunk_text_map:
+                graph_results.append({"chunk_id": cid, "text": chunk_text_map[cid]})
                 
         return graph_results
+
+    def _retrieve_user_graph_memory_summaries(self, rewritten_query: str, top_k: int = 5) -> List[str]:
+        """从“当前用户”出发的 Agent_Memory 边中拿证据池，再在记忆库内语义召回 Top-K（不参与 RRF/精排）。"""
+        memory_event_ids: List[str] = []
+        cypher = """
+        MATCH (u:UserMemory {id: '[当前用户]'})-[r]->()
+        WHERE coalesce(r.created_by, '') = 'Agent_Memory'
+        UNWIND coalesce(r.memory_evidence_refs, []) AS mem_evt
+        RETURN mem_evt
+        """
+        with self.neo4j_driver.session() as session:
+            rows = session.run(cypher)
+            for row in rows:
+                mem_evt = (row["mem_evt"] or "").strip()
+                if mem_evt:
+                    memory_event_ids.append(mem_evt)
+
+        memory_event_ids = list(dict.fromkeys(memory_event_ids))
+        if not memory_event_ids:
+            return []
+
+        query_vector = self.embedding_model.encode([rewritten_query], normalize_embeddings=True).tolist()[0]
+        expr = "event_id in [" + ",".join([f"'{eid}'" for eid in memory_event_ids]) + "]"
+
+        try:
+            search_res = self.memory_collection.search(
+                data=[query_vector],
+                anns_field="dense_vector",
+                param={"metric_type": "COSINE", "params": {"ef": 64}},
+                limit=min(max(1, top_k), len(memory_event_ids)),
+                expr=expr,
+                output_fields=["event_id", "summary"],
+            )
+        except TypeError:
+            search_res = self.memory_collection.search(
+                data=[query_vector],
+                anns_field="dense_vector",
+                param={"metric_type": "COSINE", "params": {"ef": 64}},
+                limit=min(max(1, top_k), len(memory_event_ids)),
+                filter=expr,
+                output_fields=["event_id", "summary"],
+            )
+        except Exception as e:
+            logging.warning("⚠️ [用户图记忆] 语义召回失败: %s", e)
+            return []
+
+        summaries = []
+        for idx, hit in enumerate(search_res[0], start=1):
+            summary = (hit.entity.get("summary") or "").strip()
+            if not summary:
+                continue
+            summaries.append(f"[用户图记忆{idx}] {summary}")
+        return summaries
 
     def retrieve_local(self, query: str, entities: List[str], top_k: int = 6) -> List[str]:
         """
@@ -311,7 +376,7 @@ class HybridRetriever:
         passed_chunks.sort(key=lambda x: x["rerank_score"], reverse=True)
         return [c["text"] for c in passed_chunks[:top_k]]
 
-    def retrieve_memory_records(self, query: str, entities: List[str], top_k: int = 3) -> List[str]:
+    def retrieve_memory_records(self, query: str, entities: List[str], top_k: int = 2) -> List[str]:
         """
         【MEMORY 记忆轨】：对话记忆库做 Dense + Sparse 双路召回，再做内部 RRF 融合。
         不走 Cross-Encoder，避免把私有记忆召回链路变重。
@@ -377,11 +442,11 @@ class HybridRetriever:
 
         fused_memories = fused_memories[:top_k]
         formatted = []
-        for item in fused_memories:
+        for idx, item in enumerate(fused_memories, start=1):
             summary = (item.get("summary") or "").strip()
             if not summary:
                 continue
-            formatted.append(f"[记忆摘要] {summary}")
+            formatted.append(f"[记忆摘要{idx}] {summary}")
 
         return formatted
 
@@ -413,6 +478,8 @@ class HybridRetriever:
         """总控调度器"""
         context_parts = []
         normalized_mode = (mode or "").upper()
+        entities = entities or []
+        has_current_user = any((e or "").strip() in {"当前用户", "[当前用户]"} for e in entities)
 
         if normalized_mode == "DIRECT":
             logging.info("💬 [DIRECT 模式] 跳过所有检索，直接返回空上下文")
@@ -420,41 +487,54 @@ class HybridRetriever:
         
         if normalized_mode == "LOCAL":
             # 将 Router 提取出的 entities 传给 Local 检索
-            chunks = self.retrieve_local(rewritten_query, entities or [], top_k=settings.top_k_rerank)
+            chunks = self.retrieve_local(rewritten_query, entities, top_k=settings.top_k_rerank)
             if chunks:
                 context_parts.append("【检索到的原著片段】：\n" + "\n---\n".join(chunks))
 
         elif normalized_mode == "GLOBAL":
             # 1. 宏观轨道：检索全局社区摘要（不参与底层 RRF，独立作为上帝视角）
-            summaries = self.retrieve_global(rewritten_query, top_k=3)
+            summaries = self.retrieve_global(rewritten_query, top_k=settings.global_summary_top_k)
             if summaries:
                 context_parts.append("【核心宏观剧情概括】：\n" + "\n---\n".join(summaries))
             
             # 2. 微观轨道：【响应你的优化】依然保留原始切片的向量召回与全文检索！
             # 虽然摘要不参与 RRF，但底层切片本身依然需要通过 RRF+精排 选出最相关的几条作为细节补充。
             logging.info("🌍 [GLOBAL 模式] 正在补充底层原文切片的向量召回...")
-            aux_chunks = self.retrieve_local(rewritten_query, entities=entities or [], top_k=3)
+            aux_chunks = self.retrieve_local(
+                rewritten_query,
+                entities=entities,
+                top_k=settings.global_detail_chunk_top_k,
+            )
             if aux_chunks:
                 context_parts.append("【原著细节辅助补充】：\n" + "\n---\n".join(aux_chunks))
 
         elif normalized_mode == "MEMORY":
             memory_records = self.retrieve_memory_records(
                 rewritten_query,
-                entities=entities or [],
-                top_k=3,
+                entities=entities,
+                top_k=settings.memory_summary_top_k,
             )
             if memory_records:
                 context_parts.append("【用户专属对话记忆】：\n" + "\n---\n".join(memory_records))
 
             chunks = self.retrieve_local(
                 rewritten_query,
-                entities=entities or [],
-                top_k=settings.top_k_rerank,
+                entities=entities,
+                top_k=settings.memory_detail_chunk_top_k,
             )
             if chunks:
                 context_parts.append("【原著相关切片】：\n" + "\n---\n".join(chunks))
         else:
             logging.warning("⚠️ 未知路由模式: %s，返回空上下文", mode)
             return ""
+
+        # 只在 LOCAL / GLOBAL 下追加用户图谱记忆；MEMORY 模式默认不追加，避免同库子集重复注入。
+        if has_current_user and normalized_mode in {"LOCAL", "GLOBAL"}:
+            user_graph_mem = self._retrieve_user_graph_memory_summaries(
+                rewritten_query=rewritten_query,
+                top_k=settings.user_graph_memory_top_k,
+            )
+            if user_graph_mem:
+                context_parts.append("【当前用户图谱记忆召回】：\n" + "\n---\n".join(user_graph_mem))
             
         return "\n\n====================\n\n".join(context_parts)
