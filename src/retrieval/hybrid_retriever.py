@@ -3,10 +3,10 @@ import re
 from typing import List, Dict, Any
 from pymilvus import Collection, connections
 from neo4j import GraphDatabase
+from langsmith import traceable
 
 from src.config import settings
 from src.utils.model_factory import ModelFactory
-from src.utils.tracing import traceable
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 

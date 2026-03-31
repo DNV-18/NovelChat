@@ -1,8 +1,8 @@
 import requests
 from typing import Any, Dict, List, Tuple
+from langsmith import traceable
 
 from src.config import settings
-from src.utils.tracing import traceable
 
 class APIEmbeddingModel:
     def __init__(self, base_url, api_key, model_name):

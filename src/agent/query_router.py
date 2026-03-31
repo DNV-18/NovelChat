@@ -2,10 +2,10 @@ import json
 import logging
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
+from langsmith import traceable
 
 from src.config import settings
 from src.utils.model_factory import ModelFactory
-from src.utils.tracing import traceable
 from src.utils.prompts import (
     QUERY_ROUTER_SYSTEM_PROMPT,
     build_query_router_user_prompt,

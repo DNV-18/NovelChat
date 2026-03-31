@@ -11,7 +11,7 @@ except Exception:
 # 假设已导入你的模块
 from src.config import settings
 from src.utils.model_factory import ModelFactory
-from src.utils.tracing import traceable
+from langsmith import traceable
 from src.utils.prompts import build_main_agent_system_prompt
 from src.agent.query_router import QueryRouter
 from src.retrieval.hybrid_retriever import HybridRetriever
