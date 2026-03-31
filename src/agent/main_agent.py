@@ -150,6 +150,7 @@ class NovelAgent:
             model_tier=settings.main_agent_model_tier,
             tools=AGENT_MEMORY_TOOLS,
             tool_choice="auto", # 让大模型自己决定用不用工具
+            max_tokens=26248,
             temperature=0.7,
         )
 

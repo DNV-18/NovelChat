@@ -335,6 +335,14 @@ async def feishu_webhook(request: Request, background_tasks: BackgroundTasks):
         logger.warning("Webhook JSON 解析失败 | req_id=%s", req_id)
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
+    logger.info(
+        "Webhook 载荷摘要 | req_id=%s | top_keys=%s | event_type=%s | has_encrypt=%s",
+        req_id,
+        list(payload.keys()),
+        payload.get("header", {}).get("event_type") or payload.get("event", {}).get("type"),
+        "encrypt" in payload,
+    )
+
     # 若启用“事件加密”，飞书只会推送 encrypt 字段；当前实现未做解密。
     if "encrypt" in payload:
         logger.error("收到加密事件但未配置解密 | req_id=%s", req_id)
@@ -359,6 +367,14 @@ async def feishu_webhook(request: Request, background_tasks: BackgroundTasks):
     if msg_type is None:
         logger.info("非消息事件已忽略 | req_id=%s | payload_keys=%s", req_id, list(payload.keys()))
         return {"msg": "ok"}
+
+    logger.info(
+        "消息事件解析结果 | req_id=%s | msg_type=%s | message_id=%s | user_id=%s",
+        req_id,
+        msg_type,
+        message_id,
+        user_id,
+    )
 
     if msg_type != "text":
         logger.info("非 text 消息已忽略 | req_id=%s | msg_type=%s", req_id, msg_type)

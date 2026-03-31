@@ -5,7 +5,17 @@ import time
 import logging
 import re
 from neo4j import GraphDatabase
-from pymilvus import connections, db, utility, FieldSchema, CollectionSchema, DataType, Collection
+from pymilvus import (
+    connections,
+    db,
+    utility,
+    FieldSchema,
+    CollectionSchema,
+    DataType,
+    Collection,
+    Function,
+    FunctionType,
+)
 
 from src.config import settings
 from src.utils.model_factory import ModelFactory
@@ -218,7 +228,7 @@ class MemoryManager:
 
     def _init_milvus_collection(self):
         """确保 Milvus 中存在对话轮次记忆库。"""
-        expected_fields = [
+        legacy_fields = [
             "event_id",
             "timestamp",
             "user_query",
@@ -226,11 +236,27 @@ class MemoryManager:
             "summary",
             "dense_vector",
         ]
+        expected_fields = [
+            "event_id",
+            "timestamp",
+            "user_query",
+            "ai_response",
+            "summary",
+            "dense_vector",
+            "sparse_vector",
+        ]
 
         if utility.has_collection(self.milvus_collection_name, using="default"):
             existing = Collection(self.milvus_collection_name, using="default")
             existing_fields = [f.name for f in existing.schema.fields]
             if existing_fields != expected_fields:
+                if existing_fields == legacy_fields:
+                    logging.warning(
+                        "检测到旧版记忆集合 schema（无 sparse_vector）。"
+                        "当前进程将继续兼容运行；如需启用 BM25 稀疏向量，请执行清理并重建记忆集合。"
+                    )
+                    self.event_collection = existing
+                    return
                 raise RuntimeError(
                     "Milvus 长期记忆集合字段与新架构不兼容。"
                     f" 当前字段={existing_fields}，期望字段={expected_fields}。"
@@ -246,14 +272,42 @@ class MemoryManager:
                 FieldSchema(name="timestamp", dtype=DataType.INT64), # 记录记忆发生的时间戳
                 FieldSchema(name="user_query", dtype=DataType.VARCHAR, max_length=65535),
                 FieldSchema(name="ai_response", dtype=DataType.VARCHAR, max_length=65535),
-                FieldSchema(name="summary", dtype=DataType.VARCHAR, max_length=8192), # 【新增】存放高密度摘要
-                FieldSchema(name="dense_vector", dtype=DataType.FLOAT_VECTOR, dim=settings.milvus_vector_dim)
+                FieldSchema(
+                    name="summary",
+                    dtype=DataType.VARCHAR,
+                    max_length=8192,
+                    enable_analyzer=True,
+                    enable_match=True,
+                    analyzer_params={"type": "chinese"},
+                ),
+                FieldSchema(name="dense_vector", dtype=DataType.FLOAT_VECTOR, dim=settings.milvus_vector_dim),
+                FieldSchema(name="sparse_vector", dtype=DataType.SPARSE_FLOAT_VECTOR),
             ]
-            schema = CollectionSchema(fields, description="Agentic 对话轮次长期记忆库")
+
+            bm25_function = Function(
+                name="summary_bm25_emb",
+                input_field_names=["summary"],
+                output_field_names=["sparse_vector"],
+                function_type=FunctionType.BM25,
+            )
+
+            schema = CollectionSchema(
+                fields,
+                functions=[bm25_function],
+                description="Agentic 对话轮次长期记忆库",
+            )
             collection = Collection(self.milvus_collection_name, schema, using="default")
             collection.create_index(
                 field_name="dense_vector", 
                 index_params={"metric_type": "COSINE", "index_type": "HNSW", "params": {"M": 16, "efConstruction": 200}}
+            )
+            collection.create_index(
+                field_name="summary",
+                index_params={"index_type": "INVERTED"},
+            )
+            collection.create_index(
+                field_name="sparse_vector",
+                index_params={"index_type": "SPARSE_INVERTED_INDEX", "metric_type": "BM25"},
             )
         self.event_collection = Collection(self.milvus_collection_name, using="default")
 
