@@ -94,12 +94,12 @@ class Settings(BaseSettings):
     max_retries: int = Field(3, description="API 请求失败重试次数")
     rrf_k: int = Field(60, description="RRF (倒数秩融合) 的平滑常数 k")
     top_k_retrieval: int = Field(60, description="单路召回的初始 Chunk 数量")
-    top_k_rerank: int = Field(6, description="Cross-Encoder 精排后最终喂给大模型的 Chunk 数量")
-    global_summary_top_k: int = Field(3, description="GLOBAL 模式宏观摘要召回数量")
+    top_k_rerank: int = Field(10, description="Cross-Encoder 精排后最终喂给大模型的 Chunk 数量")
+    global_summary_top_k: int = Field(7, description="GLOBAL 模式宏观摘要召回数量")
     global_detail_chunk_top_k: int = Field(3, description="GLOBAL 模式微观细节补充切片数量")
-    memory_summary_top_k: int = Field(2, description="MEMORY 模式返回的记忆摘要数量")
-    memory_detail_chunk_top_k: int = Field(4, description="MEMORY 模式补充的原著切片数量")
-    user_graph_memory_top_k: int = Field(2, description="命中当前用户实体时，从图谱证据池语义召回的记忆摘要数量")
+    memory_summary_top_k: int = Field(3, description="MEMORY 模式返回的记忆摘要数量")
+    memory_detail_chunk_top_k: int = Field(7, description="MEMORY 模式补充的原著切片数量")
+    user_graph_memory_top_k: int = Field(3, description="命中当前用户实体时，从图谱证据池语义召回的记忆摘要数量")
     rerank_threshold: float = Field(0.70, description="Cross-Encoder 精排绝对阈值，低于该分数的结果将被剔除")
 
     # 声明从哪读取环境变量

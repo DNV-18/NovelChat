@@ -119,8 +119,8 @@ def reply_feishu_message(message_id: str, content: str):
 def _sanitize_feishu_text(text: str) -> str:
     """清理飞书文本中的 @ 机器人片段和多余空白。"""
     content = (text or "").strip()
-    # 常见格式：@_user_1 或 @ou_xxx
-    content = re.sub(r"@[_a-zA-Z0-9]+", "", content)
+    # 【精准打击】：只匹配飞书特征的 @_user_xxx 或 @ou_xxx，避免误杀正常邮箱地址
+    content = re.sub(r"@(_user_[0-9]+|ou_[a-zA-Z0-9]+)", "", content)
     content = re.sub(r"\s+", " ", content).strip()
     return content
 
@@ -246,7 +246,8 @@ async def feishu_webhook(request: Request, background_tasks: BackgroundTasks):
         return {"challenge": payload["challenge"]}
 
     # 普通事件也执行 token 校验（若飞书推送包含 token 字段）
-    if payload.get("token") and payload.get("token") != FEISHU_VERIFICATION_TOKEN:
+    event_token = payload.get("token") or payload.get("header", {}).get("token")
+    if event_token and event_token != FEISHU_VERIFICATION_TOKEN:
         raise HTTPException(status_code=403, detail="Token Invalid")
 
     # 2. 处理消息推送事件（兼容 schema 2.0 / 旧版事件）

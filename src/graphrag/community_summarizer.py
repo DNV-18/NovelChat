@@ -42,6 +42,14 @@ class CommunitySummarizer:
         self._ensure_milvus_db(settings.milvus_db_name)
         self.summary_collection_name = settings.milvus_community_summary_collection
         self._init_milvus_collection()
+        # 4. 初始化图谱：清空历史的 Community 节点及其连线
+        self._clear_neo4j_communities()
+
+    def _clear_neo4j_communities(self):
+        """清空 Neo4j 中上一轮跑出来的所有 Community 节点以及它们所挂载的关系(BELONGS_TO, SUBCOMMUNITY_OF)"""
+        print("🧹 正在清理 Neo4j 历史社区数据...")
+        with self.driver.session() as session:
+            session.run("MATCH (c:Community) DETACH DELETE c")
 
     def close(self):
         """释放 Neo4j 连接。"""
@@ -139,15 +147,55 @@ class CommunitySummarizer:
                 ig_graph.add_edges(edges)
                 ig_graph.es["weight"] = weights
 
-            # 2) Leiden 分区
-            current_resolution = 6.4 if level == 0 else 1.0
+            # 2) 递归 Leiden 分区 (动态分辨率 + 强力保底切分)
+            def _get_recursive_partition(sub_ig, max_size, current_res=1.0, step=0.2, max_res=3.0):
+                part = leidenalg.find_partition(
+                    sub_ig,
+                    leidenalg.RBConfigurationVertexPartition,
+                    weights=sub_ig.es["weight"] if sub_ig.ecount() > 0 else None,
+                    resolution_parameter=current_res
+                )
+                
+                final_clusters = []
+                for cluster in part:
+                    if len(cluster) <= max_size:
+                        final_clusters.append(cluster)
+                    else:
+                        # 触发保底：只要达到了容忍的极限(分辨率拉满)，就不再走算法死磕，硬切块！
+                        if current_res >= max_res:
+                            for i in range(0, len(cluster), max_size):
+                                final_clusters.append(cluster[i:i+max_size])
+                        else:
+                            # 还在容忍范围内，如果发现刚才那一刀没作用(len=1)，就猛加力(step*2)，否则正常加力(step)
+                            next_res = current_res + (step * 2 if len(part) == 1 else step)
+                            child_ig = sub_ig.subgraph(cluster)
+                            sub_clusters = _get_recursive_partition(child_ig, max_size, next_res, step, max_res)
+                            
+                            for sc in sub_clusters:
+                                final_clusters.append([cluster[i] for i in sc])
+                return final_clusters
 
-            partition = leidenalg.find_partition(
-                ig_graph,
-                leidenalg.RBConfigurationVertexPartition,
-                weights=ig_graph.es["weight"] if ig_graph.ecount() > 0 else None,
-                resolution_parameter=current_resolution
-            )
+            MAX_COMMUNITY_SIZE = 800  # Level 0 实体数限制
+            MAX_SUBCOMMUNITY_SIZE = 500 # Level 1+ 子社区数限制 (保护 128k 窗口)
+            
+            if level == 0:
+                partition = _get_recursive_partition(
+                    ig_graph, 
+                    max_size=MAX_COMMUNITY_SIZE, 
+                    current_res=1.0,
+                    step=0.2,
+                    max_res=3.0
+                )
+            else:
+                # 高层级的网络采用极温和阻力(0.01~0.05起)，允许大图自然合并，防止被激进的分辨率震碎！
+                # 只有遇到大到离谱的（>500）才会介入切分。
+                partition = _get_recursive_partition(
+                    ig_graph,
+                    max_size=MAX_SUBCOMMUNITY_SIZE,
+                    current_res=1.0,
+                    step=0.01,  
+                    max_res=1.5
+                )
 
             # 3) 记录当前层社区
             level_communities: List[Dict[str, list]] = []
@@ -194,7 +242,9 @@ class CommunitySummarizer:
                 if cu == cv:
                     continue
                 key = tuple(sorted((cu, cv)))
-                edge_weights[key] += float(data.get("weight", 1.0))
+                # 修复边缘孤岛问题：在社区合并时，非线性放大不同超级节点间的长尾弱联系
+                # 否则长尾节点之间的边权重相对于大核会太小，导致永远合并不到一起
+                edge_weights[key] += float(data.get("weight", 1.0)) * 2.0
 
             for (cu, cv), w in edge_weights.items():
                 next_graph.add_edge(cu, cv, weight=w)
@@ -353,7 +403,13 @@ class CommunitySummarizer:
         print("\n📊 Leiden 算法收敛完毕！【层级结构报告】:")
         print(f"   ▶ 共生成 {total_levels} 个抽象层级。")
         for lvl, comms in hierarchy.items():
-            print(f"   ▶ Level {lvl}: 共划分出 {len(comms)} 个超级社区。")
+            if lvl == 0:
+                max_size = max(len(c.get("nodes", [])) for c in comms) if comms else 0
+                size_type = "实体"
+            else:
+                max_size = max(len(c.get("sub_communities", [])) for c in comms) if comms else 0
+                size_type = "子社区"
+            print(f"   ▶ Level {lvl}: 共划分出 {len(comms)} 个超级社区。最大社区包含 {max_size} 个{size_type}。")
         print("="*50)
 
         # 3. 自底向上 (Bottom-Up) 生成摘要并双写入库
@@ -430,9 +486,10 @@ class CommunitySummarizer:
                 self._save_to_neo4j(cid, level, child_ids, summary_text)
 
                 # c. 收集 Milvus 数据
-                milvus_data_to_insert["community_ids"].append(cid)
-                milvus_data_to_insert["levels"].append(level)
-                milvus_data_to_insert["summaries"].append(summary_text)
+                if level < total_levels - 3:
+                    milvus_data_to_insert["community_ids"].append(cid)
+                    milvus_data_to_insert["levels"].append(level)
+                    milvus_data_to_insert["summaries"].append(summary_text)
 
         level_pbar.close()
         community_pbar.close()
