@@ -6,6 +6,7 @@ from neo4j import GraphDatabase
 
 from src.config import settings
 from src.utils.model_factory import ModelFactory
+from src.utils.tracing import traceable
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -551,6 +552,7 @@ class HybridRetriever:
             
         return summaries
 
+    @traceable(name="hybrid_retriever_execute", run_type="retriever")
     def execute_retrieval(self, mode: str, rewritten_query: str, entities: List[str] = None) -> str:
         """总控调度器"""
         context_parts = []

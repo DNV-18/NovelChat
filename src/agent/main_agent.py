@@ -11,6 +11,7 @@ except Exception:
 # 假设已导入你的模块
 from src.config import settings
 from src.utils.model_factory import ModelFactory
+from src.utils.tracing import traceable
 from src.utils.prompts import build_main_agent_system_prompt
 from src.agent.query_router import QueryRouter
 from src.retrieval.hybrid_retriever import HybridRetriever
@@ -100,6 +101,7 @@ class NovelAgent:
         except Exception as e:
             print(f"⚠️ [后台记忆] 执行失败: {e}")
 
+    @traceable(name="novel_agent_chat", run_type="chain")
     def chat(self, user_message: str, chat_history: List[Dict] = None):
         """
         一次完整的问答生命周期

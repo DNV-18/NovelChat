@@ -507,13 +507,21 @@ class CommunitySummarizer:
                 f"向量维度不匹配: collection dim={settings.milvus_vector_dim}, embedding dim={len(vectors[0])}"
             )
         
-        print(f"💾 正在向 Milvus ({self.summary_collection_name}) 写入 {len(vectors)} 条全局摘要...")
-        self.collection.insert([
-            milvus_data_to_insert["community_ids"],
-            milvus_data_to_insert["levels"],
-            milvus_data_to_insert["summaries"],
-            vectors
-        ])
+        print(f"💾 正在向 Milvus ({self.summary_collection_name}) 写入 {len(vectors)} 条全局摘要，batch_size={settings.milvus_insert_batch_size}...")
+        
+        c_ids = milvus_data_to_insert["community_ids"]
+        c_levels = milvus_data_to_insert["levels"]
+        c_summaries = milvus_data_to_insert["summaries"]
+        batch_size = settings.milvus_insert_batch_size
+        
+        for i in range(0, len(c_ids), batch_size):
+            self.collection.insert([
+                c_ids[i : i + batch_size],
+                c_levels[i : i + batch_size],
+                c_summaries[i : i + batch_size],
+                vectors[i : i + batch_size]
+            ])
+            
         self.collection.flush()
         
         print("✅ GraphRAG 社区划分、LLM 摘要生成、Neo4j/Milvus 双写任务完美收官！")

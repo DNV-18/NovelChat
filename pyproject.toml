@@ -40,6 +40,7 @@ dependencies = [
     "pandas>=2.1.0",
     "tqdm>=4.66.0",          # 进度条 (处理小说切片时极度需要)
     "aiohttp>=3.9.0",        # 异步网络请求
+    "langsmith>=0.1.142",    # LangSmith tracing SDK
 ]
 
 [project.optional-dependencies]

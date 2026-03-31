@@ -429,6 +429,7 @@ class MemoryManager:
             cypher = f"""
             MERGE (n1:UserMemory {{id: $source}})
             ON CREATE SET n1.type = 'User_Node', n1.description = 'Current user memory node'
+            WITH n1
             
             OPTIONAL MATCH (n2e:Entity {{id: $target}})
             OPTIONAL MATCH (n2m:MemoryEntity {{id: $target}})

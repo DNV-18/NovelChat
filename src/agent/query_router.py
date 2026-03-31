@@ -5,6 +5,7 @@ from typing import List, Optional, Literal
 
 from src.config import settings
 from src.utils.model_factory import ModelFactory
+from src.utils.tracing import traceable
 from src.utils.prompts import (
     QUERY_ROUTER_SYSTEM_PROMPT,
     build_query_router_user_prompt,
@@ -47,6 +48,7 @@ class QueryRouter:
             return text[start : end + 1]
         return text
 
+    @traceable(name="query_router_route", run_type="chain")
     def route_query(self, user_query: str, chat_history: List[dict] = None) -> RouteResult:
         """
         核心路由判定方法

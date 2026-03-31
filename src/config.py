@@ -20,9 +20,9 @@ class Settings(BaseSettings):
     openai_base_url: str = Field("http://localhost:6006/v1", description="LLM Base URL")
     
     # 默认的主力/聪明模型 (主控 Agent 使用)
-    smart_llm_model: str = Field("Qwen3.5-27B", description="主控 Agent 使用的高级模型")
+    smart_llm_model: str = Field("doubao-seed-2-0-mini-260215", description="主控 Agent 使用的高级模型")
     # 默认的廉价/快速模型 (路由、补充上下文使用)
-    cheap_llm_model: str = Field("Qwen3.5-27B", description="流水线任务使用的高性价比模型")
+    cheap_llm_model: str = Field("doubao-seed-2-0-pro-260215", description="流水线任务使用的高性价比模型")
     
     # 稠密向量 Embedding 模型名称
     embedding_api_key: str = Field("EMPTY", description="Embedding API Key")

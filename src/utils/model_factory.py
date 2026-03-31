@@ -2,6 +2,7 @@ import requests
 from typing import Any, Dict, List, Tuple
 
 from src.config import settings
+from src.utils.tracing import traceable
 
 class APIEmbeddingModel:
     def __init__(self, base_url, api_key, model_name):
@@ -127,6 +128,7 @@ class ModelFactory:
         return OpenAI(api_key=api_key, base_url=base_url)
     
     @classmethod
+    @traceable(name="llm_chat_completion", run_type="llm")
     def chat_completion(
         cls,
         messages: List[Dict[str, str]],
@@ -184,6 +186,7 @@ class ModelFactory:
         return cls._async_llm_client_instance
 
     @classmethod
+    @traceable(name="llm_chat_completion_async", run_type="llm")
     async def chat_completion_async(
         cls,
         messages: List[Dict[str, str]],

@@ -67,7 +67,31 @@ def dump_collection_samples(collection_name: str, limit: int) -> None:
     print(f"num_entities={collection.num_entities}")
     print(f"returned_rows={len(rows)}")
     print("fields=", output_fields)
-    print(json.dumps(rows, ensure_ascii=False, indent=2, default=str))
+    
+    # 【新增】：检查是否有生成失败的无效摘要数据
+    failed_keywords = ["该社区摘要暂不可用", "该社区暂不可用", "暂无稳定可总结信息", "该社区暂无可总结内容", "暂无可总结内容"]
+    valid_rows = []
+    failed_rows = []
+    
+    for row in rows:
+        summary_text = row.get("summary", "")
+        # 简单匹配几个生成失败时候可能回填的占位符文本
+        is_failed = any(kw in summary_text for kw in failed_keywords) or not summary_text.strip()
+        
+        if is_failed:
+            failed_rows.append(row)
+        else:
+            valid_rows.append(row)
+            
+    print(f"\n✅ 有效摘要数: {len(valid_rows)}")
+    print(f"❌ 失败/无效摘要数: {len(failed_rows)}")
+    
+    if failed_rows:
+        print("\n⚠️ 以下为部分生成失败的异常数据样本：")
+        print(json.dumps(failed_rows[:5], ensure_ascii=False, indent=2, default=str))
+
+    print("\n📄 部分有效数据样本：")
+    print(json.dumps(valid_rows[:limit], ensure_ascii=False, indent=2, default=str))
 
 
 def main() -> None:
