@@ -1,0 +1,29 @@
+{
+  "generated_at": "2026-04-01T15:41:37",
+  "records": [
+    {
+      "metric": "faithfulness",
+      "adapt": "skip: adapt() not available",
+      "prompts": [
+        {
+          "prompt_name": "n_l_i_statement_prompt",
+          "instruction": "Your task is to judge the faithfulness of a series of statements based on a given context. For each statement you must return verdict as 1 if the statement can be directly inferred based on the context or 0 if the statement can not be directly inferred based on the context."
+        },
+        {
+          "prompt_name": "statement_generator_prompt",
+          "instruction": "Given a question and an answer, analyze the complexity of each sentence in the answer. Break down each sentence into one or more fully understandable statements. Ensure that no pronouns are used in any statement. Format the outputs in JSON."
+        }
+      ]
+    },
+    {
+      "metric": "context_precision",
+      "adapt": "skip: adapt() not available",
+      "prompts": [
+        {
+          "prompt_name": "context_precision_prompt",
+          "instruction": "Given question, answer and context verify if the context was useful in arriving at the given answer. Give verdict as \"1\" if useful and \"0\" if not with json output."
+        }
+      ]
+    }
+  ]
+}

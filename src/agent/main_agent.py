@@ -1,7 +1,10 @@
 import json
+import math
 import threading
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict
+from pathlib import Path
 
 try:
     from prompt_toolkit import prompt as pt_prompt
@@ -30,6 +33,113 @@ class NovelAgent:
         # 记忆写入与工具执行改为后台线程，避免阻塞主回复
         self._memory_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="memory-bg")
         self._memory_lock = threading.RLock()
+        # Ragas 评估日志写入锁，确保多线程追加 JSONL 安全
+        self._ragas_log_lock = threading.Lock()
+
+    @staticmethod
+    def _split_contexts(retrieved_context: str) -> List[str]:
+        """将检索上下文文本切分为 Ragas 需要的 List[str]。"""
+        raw = (retrieved_context or "").strip()
+        if not raw:
+            return []
+
+        # 优先按业务常用分隔符切分，再兜底按统一大分隔切分
+        parts = [p.strip() for p in raw.split("\n---\n") if p.strip()]
+        if not parts:
+            parts = [p.strip() for p in raw.split("\n\n====================\n\n") if p.strip()]
+        return parts if parts else [raw]
+
+    def _async_evaluate_and_log(self, question: str, contexts: List[str], answer: str):
+        """后台执行 Ragas 评估并将结果落地到 logs/rag_eval_logs.jsonl。"""
+        try:
+            # 严格按需求使用原生 Ragas + Dataset，不引入 LangChain Wrapper
+            from datasets import Dataset
+            from ragas import evaluate
+            from ragas.metrics import faithfulness
+            from ragas.metrics._context_precision import LLMContextPrecisionWithoutReference
+            from ragas.llms import llm_factory
+            from ragas.run_config import RunConfig
+            from openai import OpenAI
+
+            data = {
+                "question": [question or ""],
+                "contexts": [contexts or []],
+                "answer": [answer or ""],
+            }
+            dataset = Dataset.from_dict(data)
+
+            # 该版本的 context_precision 需要 reference 列；改用无 reference 版本以适配当前数据结构
+            context_precision_wo_ref = LLMContextPrecisionWithoutReference()
+
+            def _run_eval_once(max_tokens: int):
+                eval_client = OpenAI(
+                    api_key=settings.openai_api_key,
+                    base_url=settings.openai_base_url,
+                )
+                # 这里是 Ragas 自己的 LLM 封装链路，直接控制其内部 OpenAI 调用参数
+                eval_llm = llm_factory(
+                    settings.smart_llm_model,
+                    client=eval_client,
+                    temperature=0.0,
+                    max_tokens=max_tokens,
+                    extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                )
+
+                return evaluate(
+                    dataset,
+                    metrics=[faithfulness, context_precision_wo_ref],
+                    llm=eval_llm,
+                    show_progress=False,
+                    raise_exceptions=False,
+                    run_config=RunConfig(timeout=180, max_retries=2),
+                ).to_pandas().iloc[0].to_dict()
+
+            result_dict = _run_eval_once(max_tokens=16248)
+
+            faithfulness_score = float(result_dict.get("faithfulness", 0.0) or 0.0)
+            context_precision_score = float(
+                result_dict.get("llm_context_precision_without_reference", 0.0) or 0.0
+            )
+
+            # 兜底：若 faithfulness 因 length/结构化截断返回 nan，再提升一次上限重试。
+            if math.isnan(faithfulness_score):
+                result_dict_retry = _run_eval_once(max_tokens=4096)
+                retry_faith = float(result_dict_retry.get("faithfulness", 0.0) or 0.0)
+                retry_ctx = float(
+                    result_dict_retry.get("llm_context_precision_without_reference", 0.0) or 0.0
+                )
+                if not math.isnan(retry_faith):
+                    result_dict = result_dict_retry
+                    faithfulness_score = retry_faith
+                    context_precision_score = retry_ctx
+
+            project_root = Path(__file__).resolve().parents[2]
+            log_dir = project_root / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = log_dir / "rag_eval_logs.jsonl"
+
+            payload = {
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "question": question,
+                "contexts": contexts,
+                "answer": answer,
+                "scores": {
+                    "faithfulness": faithfulness_score,
+                    "context_precision": context_precision_score,
+                },
+                "raw": result_dict,
+            }
+
+            with self._ragas_log_lock:
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+            print(
+                f"📊 [Ragas 评估完成] 模型: {settings.smart_llm_model} | "
+                f"忠实度: {faithfulness_score:.4f} | 上下文精度: {context_precision_score:.4f}"
+            )
+        except Exception as e:
+            print(f"⚠️ [Ragas 评估] 失败: {e}")
 
     @staticmethod
     def _prepare_recent_history(chat_history: List[Dict], max_rounds: int = 2) -> List[Dict]:
@@ -169,6 +279,15 @@ class NovelAgent:
             final_response,
             tool_calls,
         )
+
+        # 6. 后台异步执行 Ragas 伴随评估（零阻塞）
+        eval_contexts = self._split_contexts(retrieved_context)
+        threading.Thread(
+            target=self._async_evaluate_and_log,
+            args=(user_message, eval_contexts, final_response),
+            daemon=True,
+            name="ragas-eval-bg",
+        ).start()
 
         return final_response
 
