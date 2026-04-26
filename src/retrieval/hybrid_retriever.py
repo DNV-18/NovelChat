@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from typing import List, Dict, Any
@@ -10,21 +11,23 @@ from src.utils.model_factory import ModelFactory
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+
 class HybridRetriever:
     """
     Phase 5: 混合检索与重排引擎 (终极形态)
     1. LOCAL 模式：执行 Dense + Sparse + Graph 三路 RRF 融合，并进行 Cross-Encoder 精排。
     2. GLOBAL 模式：双轨并行！既检索高维社区摘要，又保留底层原文切片的向量与全文召回。
     """
+
     def __init__(self):
         # 1. 挂载模型
         self.embedding_model = ModelFactory.get_embedding_model()
         self.reranker = ModelFactory.get_reranker_model()
-        
+
         # 2. 挂载 Milvus
         connections.connect("default", uri=settings.milvus_uri, db_name=settings.milvus_db_name)
         self.chunk_collection = Collection(settings.milvus_collection_name)       # 原文表
-        self.summary_collection = Collection(settings.milvus_community_summary_collection) # 摘要表
+        self.summary_collection = Collection(settings.milvus_community_summary_collection)  # 摘要表
         self.memory_collection = Collection(settings.milvus_chat_memory_collection)
 
         # 将常用 collection 预加载，避免首次查询抖动
@@ -34,7 +37,7 @@ class HybridRetriever:
 
         # 3. 挂载 Neo4j (用于 LOCAL 模式的图谱线索召回)
         self.neo4j_driver = GraphDatabase.driver(
-            settings.neo4j_uri, 
+            settings.neo4j_uri,
             auth=(settings.neo4j_username, settings.neo4j_password)
         )
 
@@ -54,11 +57,12 @@ class HybridRetriever:
         将语义、关键字、图谱三路召回的结果打分融合。
         """
         rrf_scores = {}
-        chunk_data_map = {} # 用于保存实际内容
-        
+        chunk_data_map = {}  # 用于保存实际内容
+
         # 定义一个内部闭包处理每一路数据
         def process_results(results, weight=1.0):
-            if not results: return
+            if not results:
+                return
             for rank, item in enumerate(results):
                 cid = item.get(id_field)
                 if not cid:
@@ -71,7 +75,7 @@ class HybridRetriever:
         process_results(dense_results)
         process_results(sparse_results)
         if graph_results:
-            process_results(graph_results, weight=2.0) # 将图谱召回的切片同样加入 RRF 擂台！
+            process_results(graph_results, weight=2.0)  # 将图谱召回的切片同样加入 RRF 擂台！
 
         # 按 RRF 分数倒序排序
         sorted_cids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
@@ -175,7 +179,8 @@ class HybridRetriever:
             return []
 
         limit = max(1, search_limit)
-        has_sparse_vector = any(getattr(f, "name", "") == "sparse_vector" for f in collection.schema.fields)
+        has_sparse_vector = any(getattr(f, "name", "") ==
+                                "sparse_vector" for f in collection.schema.fields)
 
         if has_sparse_vector:
             try:
@@ -208,7 +213,8 @@ class HybridRetriever:
 
                 return merged
             except Exception as e:
-                logging.warning("⚠️ [Sparse-BM25] sparse_vector 检索失败，query='%s', error=%s", search_data, e)
+                logging.warning(
+                    "⚠️ [Sparse-BM25] sparse_vector 检索失败，query='%s', error=%s", search_data, e)
 
         # 回退到 TEXT_MATCH，兼容未建 sparse_vector 的集合。
         escaped = search_data.replace("'", "\\'")
@@ -234,54 +240,63 @@ class HybridRetriever:
 
         return merged
 
-    def _get_graph_chunks(self, entities: List[str]) -> List[Dict]:
+    def _get_graph_chunks(self, query_vector: List[float]) -> List[Dict]:
         """
-        【核心逻辑】：仅从实体图谱关系中召回原著切片证据（参与 RRF）。
+        【核心逻辑】：用 Query 向量召回相似 Entity，再从种子实体扩展 1-2 跳召回原著切片证据（参与 RRF）。
         注意：不读取 Agent_Memory 的 memory_evidence_refs。
         """
-        if not entities:
+        if not query_vector:
             return []
-            
-        logging.info(f"🕸️ [图谱轨道] 正在 Neo4j 中探索实体: {entities}")
 
-        # 当前用户节点不属于 Entity，需从图实体检索列表中排除
-        normalized_entities = []
-        for e in entities:
-            token = (e or "").strip()
-            if not token or token in {"当前用户", "[当前用户]"}:
-                continue
-            normalized_entities.append(token)
-        if not normalized_entities:
-            return []
-        
-        # 1) 常规实体边：取原著 chunk 证据
+        logging.info("🕸️ [图谱轨道] 正在通过 Entity 向量索引召回种子节点...")
+
+        # 1) Query 向量 -> Entity 种子节点 -> 1-2 跳关系证据。
         # 若存在 created_by 属性键，则排除 Agent_Memory 边；不存在则退化为不过滤（避免告警）。
         if self._neo4j_property_key_exists("created_by"):
             base_cypher = """
-            UNWIND $entities AS ent_name
-            MATCH (n:Entity {id: ent_name})-[r]-(m:Entity)
-            WHERE coalesce(r.created_by, '') <> 'Agent_Memory'
-            UNWIND r.source_chunk_ids AS chunk_id
-            RETURN chunk_id, count(chunk_id) AS freq
-            ORDER BY freq DESC
-            LIMIT 60
+            CALL db.index.vector.queryNodes('entity_embedding', $entity_top_k, $query_vector)
+            YIELD node, score
+            WHERE node:Entity
+            MATCH path = (node)-[rels*1..2]-(neighbor:Entity)
+            WHERE all(rel IN rels WHERE coalesce(rel.created_by, '') <> 'Agent_Memory')
+              AND all(rel IN rels WHERE size(coalesce(rel.source_chunk_ids, [])) > 0)
+            WITH node, score, rels
+            UNWIND rels AS rel
+            UNWIND coalesce(rel.source_chunk_ids, []) AS chunk_id
+            RETURN chunk_id, count(chunk_id) AS freq, max(score) AS entity_score
+            ORDER BY entity_score DESC, freq DESC
+            LIMIT $chunk_limit
             """
         else:
             base_cypher = """
-            UNWIND $entities AS ent_name
-            MATCH (n:Entity {id: ent_name})-[r]-(m:Entity)
-            UNWIND r.source_chunk_ids AS chunk_id
-            RETURN chunk_id, count(chunk_id) AS freq
-            ORDER BY freq DESC
-            LIMIT 60
+            CALL db.index.vector.queryNodes('entity_embedding', $entity_top_k, $query_vector)
+            YIELD node, score
+            WHERE node:Entity
+            MATCH path = (node)-[rels*1..2]-(neighbor:Entity)
+            WHERE all(rel IN rels WHERE size(coalesce(rel.source_chunk_ids, [])) > 0)
+            WITH node, score, rels
+            UNWIND rels AS rel
+            UNWIND coalesce(rel.source_chunk_ids, []) AS chunk_id
+            RETURN chunk_id, count(chunk_id) AS freq, max(score) AS entity_score
+            ORDER BY entity_score DESC, freq DESC
+            LIMIT $chunk_limit
             """
 
         chunk_ids: List[str] = []
-        with self.neo4j_driver.session() as session:
-            result = session.run(base_cypher, entities=normalized_entities)
-            for record in result:
-                if record["chunk_id"]:
-                    chunk_ids.append(record["chunk_id"])
+        try:
+            with self.neo4j_driver.session() as session:
+                result = session.run(
+                    base_cypher,
+                    query_vector=query_vector,
+                    entity_top_k=settings.graph_entity_top_k,
+                    chunk_limit=settings.graph_chunk_limit,
+                )
+                for record in result:
+                    if record["chunk_id"]:
+                        chunk_ids.append(record["chunk_id"])
+        except Exception as e:
+            logging.warning("⚠️ [LOCAL-Graph] Neo4j Entity 向量检索失败: %s", e)
+            return []
 
         # 去重并保序
         chunk_ids = list(dict.fromkeys(chunk_ids))
@@ -292,54 +307,104 @@ class HybridRetriever:
         # 2) 去 Milvus 反查原著证据文本
         chunk_text_map: Dict[str, str] = {}
         if chunk_ids:
-            chunk_expr = "[" + ",".join([f"'{cid}'" for cid in chunk_ids]) + "]"
+            chunk_expr = json.dumps(chunk_ids, ensure_ascii=False)
             query_res = self.chunk_collection.query(
                 expr=f"chunk_id in {chunk_expr}",
                 output_fields=["chunk_id", "text", "pian", "ji", "zhang"],
             )
             chunk_text_map = {hit["chunk_id"]: hit.get("text", "") for hit in query_res}
-        
+
         graph_results = []
         for cid in chunk_ids:
             if cid in chunk_text_map:
                 graph_results.append({"chunk_id": cid, "text": chunk_text_map[cid]})
-                
+
         return graph_results
 
     def _retrieve_user_graph_memory_summaries(self, rewritten_query: str, top_k: int = 5) -> List[str]:
-        """从“当前用户”出发的 Agent_Memory 边中拿证据池，再在记忆库内语义召回 Top-K（不参与 RRF/精排）。"""
+        """路线B：先向量命中相关实体，再与“当前用户”边做交集，最后去记忆库语义召回 Top-K。"""
         if not self._neo4j_label_exists("UserMemory"):
             return []
         if not self._neo4j_property_key_exists("memory_evidence_refs"):
             return []
 
+        query_vector = self._encode_query_vector(rewritten_query)
         memory_event_ids: List[str] = []
-        if self._neo4j_property_key_exists("created_by"):
-            cypher = """
+
+        # 优先走路线B：Query 向量 -> Top-K 实体 -> 与当前用户关联边取交集。
+        created_by_exists = self._neo4j_property_key_exists("created_by")
+        event_limit = max(max(1, top_k) * 8, settings.graph_entity_top_k)
+        if created_by_exists:
+            narrowed_cypher = """
+            CALL db.index.vector.queryNodes('entity_embedding', $entity_top_k, $query_vector)
+            YIELD node, score
+            WHERE node:Entity
+            MATCH (u:UserMemory {id: '[当前用户]'})-[r]-(node)
+            WHERE coalesce(r.created_by, '') = 'Agent_Memory'
+            UNWIND coalesce(r.memory_evidence_refs, []) AS mem_evt
+            WITH mem_evt, max(score) AS best_score
+            RETURN mem_evt
+            ORDER BY best_score DESC
+            LIMIT $event_limit
+            """
+        else:
+            narrowed_cypher = """
+            CALL db.index.vector.queryNodes('entity_embedding', $entity_top_k, $query_vector)
+            YIELD node, score
+            WHERE node:Entity
+            MATCH (u:UserMemory {id: '[当前用户]'})-[r]-(node)
+            UNWIND coalesce(r.memory_evidence_refs, []) AS mem_evt
+            WITH mem_evt, max(score) AS best_score
+            RETURN mem_evt
+            ORDER BY best_score DESC
+            LIMIT $event_limit
+            """
+
+        fallback_cypher = (
+            """
             MATCH (u:UserMemory {id: '[当前用户]'})-[r]->()
             WHERE coalesce(r.created_by, '') = 'Agent_Memory'
             UNWIND coalesce(r.memory_evidence_refs, []) AS mem_evt
             RETURN mem_evt
+            LIMIT $event_limit
             """
-        else:
-            cypher = """
+            if created_by_exists
+            else
+            """
             MATCH (u:UserMemory {id: '[当前用户]'})-[r]->()
             UNWIND coalesce(r.memory_evidence_refs, []) AS mem_evt
             RETURN mem_evt
+            LIMIT $event_limit
             """
-        with self.neo4j_driver.session() as session:
-            rows = session.run(cypher)
-            for row in rows:
-                mem_evt = (row["mem_evt"] or "").strip()
-                if mem_evt:
-                    memory_event_ids.append(mem_evt)
+        )
+
+        try:
+            with self.neo4j_driver.session() as session:
+                rows = session.run(
+                    narrowed_cypher,
+                    query_vector=query_vector,
+                    entity_top_k=max(1, settings.graph_entity_top_k),
+                    event_limit=event_limit,
+                )
+                for row in rows:
+                    mem_evt = (row["mem_evt"] or "").strip()
+                    if mem_evt:
+                        memory_event_ids.append(mem_evt)
+        except Exception as e:
+            logging.warning("⚠️ [用户图记忆] 路线B图谱收敛失败，回退旧逻辑: %s", e)
+            with self.neo4j_driver.session() as session:
+                rows = session.run(fallback_cypher, event_limit=event_limit)
+                for row in rows:
+                    mem_evt = (row["mem_evt"] or "").strip()
+                    if mem_evt:
+                        memory_event_ids.append(mem_evt)
 
         memory_event_ids = list(dict.fromkeys(memory_event_ids))
         if not memory_event_ids:
             return []
 
-        query_vector = self._encode_query_vector(rewritten_query)
-        expr = "event_id in [" + ",".join([f"'{eid}'" for eid in memory_event_ids]) + "]"
+        safe_ids = [eid.replace("\\", "\\\\").replace("'", "\\'") for eid in memory_event_ids]
+        expr = "event_id in [" + ",".join([f"'{eid}'" for eid in safe_ids]) + "]"
 
         try:
             search_res = self.memory_collection.search(
@@ -377,7 +442,7 @@ class HybridRetriever:
         流程：Dense + BM25 + Graph -> RRF 融合 -> Reranker 二次精排
         """
         logging.info("🔍 [LOCAL 模式] 正在进行三路召回与重排...")
-        
+
         # 1. 语义向量召回 (Dense)
         query_vector = self._encode_query_vector(query)
         dense_req = self.chunk_collection.search(
@@ -392,7 +457,7 @@ class HybridRetriever:
             cid = str(hit.id)
             dense_results.append({"chunk_id": cid, "text": hit.entity.get("text", "")})
         logging.info("📌 [LOCAL-Dense] 召回 %d 条", len(dense_results))
-        
+
         # 2. 关键字全文召回 (Sparse/BM25)
         keywords = self._build_sparse_keywords(query=query, entities=entities, max_keywords=8)
         sparse_results = self._retrieve_sparse_by_text_match(
@@ -404,11 +469,11 @@ class HybridRetriever:
             search_limit=settings.top_k_retrieval,
         )
         logging.info("📌 [LOCAL-Sparse] 实体优先关键词=%s, 命中 %d 条", keywords, len(sparse_results))
-        
-        # 3. 图谱实体召回 (Graph) 
-        graph_results = self._get_graph_chunks(entities)
+
+        # 3. 图谱实体召回 (Graph)
+        graph_results = self._get_graph_chunks(query_vector)
         logging.info("📌 [LOCAL-Graph] 命中 %d 条", len(graph_results))
-        
+
         # 4. RRF 倒数秩融合 (三路全开)
         # 此时 rrf_fused_chunks 里面可能有 100~180 个去重后的切片
         rrf_fused_chunks = self._rrf(
@@ -419,19 +484,19 @@ class HybridRetriever:
             id_field="chunk_id",
         )
         logging.info("🧩 [LOCAL-RRF] 融合后去重 %d 条", len(rrf_fused_chunks))
-        
-        # 【你的神级优化：精排前的截断漏斗】
+
+        # 【优化：精排前的截断漏斗】
         # 绝对不能把 100 多条全送给昂贵的 Cross-Encoder，我们只取 RRF 得分最高的前 60 条！
         rrf_fused_chunks = rrf_fused_chunks[:settings.top_k_retrieval]
-        
+
         # 5. Cross-Encoder 终极精排
         if not rrf_fused_chunks:
             return []
-            
+
         logging.info(f"⚖️ [精排阶段] 对 RRF 粗筛出的 Top {len(rrf_fused_chunks)} 个切片进行 Cross-Encoder 打分...")
         pairs = [[query, chunk["text"]] for chunk in rrf_fused_chunks]
         scores = self.reranker.predict(pairs)
-        
+
         for chunk, score in zip(rrf_fused_chunks, scores):
             chunk["rerank_score"] = self._normalize_rerank_score(score)
 
@@ -450,7 +515,7 @@ class HybridRetriever:
         if not passed_chunks:
             logging.info("🚫 [LOCAL] 阈值过滤后无可用切片，返回空列表")
             return []
-            
+
         passed_chunks.sort(key=lambda x: x["rerank_score"], reverse=True)
         return [c["text"] for c in passed_chunks[:top_k]]
 
@@ -535,7 +600,7 @@ class HybridRetriever:
         """
         logging.info("🔭 [GLOBAL 模式] 正在检索全局社区摘要...")
         query_vector = self._encode_query_vector(query)
-        
+
         search_res = self.summary_collection.search(
             data=[query_vector],
             anns_field="dense_vector",
@@ -543,13 +608,13 @@ class HybridRetriever:
             limit=top_k,
             output_fields=["summary", "level"]
         )
-        
+
         summaries = []
         for hit in search_res[0]:
             lvl = hit.entity.get("level")
             text = hit.entity.get("summary")
             summaries.append(f"[社区层级 Level-{lvl} 摘要]：\n{text}")
-            
+
         return summaries
 
     @traceable(name="hybrid_retriever_execute", run_type="retriever")
@@ -563,7 +628,7 @@ class HybridRetriever:
         if normalized_mode == "DIRECT":
             logging.info("💬 [DIRECT 模式] 跳过所有检索，直接返回空上下文")
             return ""
-        
+
         if normalized_mode == "LOCAL":
             # 将 Router 提取出的 entities 传给 Local 检索
             chunks = self.retrieve_local(rewritten_query, entities, top_k=settings.top_k_rerank)
@@ -575,7 +640,7 @@ class HybridRetriever:
             summaries = self.retrieve_global(rewritten_query, top_k=settings.global_summary_top_k)
             if summaries:
                 context_parts.append("【核心宏观剧情概括】：\n" + "\n---\n".join(summaries))
-            
+
             # 2. 微观轨道：【响应你的优化】依然保留原始切片的向量召回与全文检索！
             # 虽然摘要不参与 RRF，但底层切片本身依然需要通过 RRF+精排 选出最相关的几条作为细节补充。
             logging.info("🌍 [GLOBAL 模式] 正在补充底层原文切片的向量召回...")
@@ -615,5 +680,5 @@ class HybridRetriever:
             )
             if user_graph_mem:
                 context_parts.append("【当前用户图谱记忆召回】：\n" + "\n---\n".join(user_graph_mem))
-            
+
         return "\n\n====================\n\n".join(context_parts)

@@ -6,29 +6,30 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # 获取项目根目录，方便后续拼接绝对路径
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
 class Settings(BaseSettings):
     """
     系统全局配置类。
     基于 pydantic-settings，它会自动从环境变量或 .env 文件中读取同名字段。
     如果没有在 .env 中配置，则会使用这里定义的默认值。
     """
-    
+
     # ==========================================
     # 🤖 1. LLM 与 本地模型选型配置
     # ==========================================
     openai_api_key: str = Field(..., description="LLM API Key")
     openai_base_url: str = Field("http://localhost:6006/v1", description="LLM Base URL")
-    
+
     # 默认的主力/聪明模型 (主控 Agent 使用)
     smart_llm_model: str = Field("doubao-seed-2-0-mini-260215", description="主控 Agent 使用的高级模型")
     # 默认的廉价/快速模型 (路由、补充上下文使用)
     cheap_llm_model: str = Field("doubao-seed-2-0-pro-260215", description="流水线任务使用的高性价比模型")
-    
+
     # 稠密向量 Embedding 模型名称
     embedding_api_key: str = Field("EMPTY", description="Embedding API Key")
     embedding_base_url: str = Field("http://localhost:5005/v1", description="Embedding Base URL")
     embedding_model_name: str = Field("Qwen3-Embedding-8B", description="文本向量化模型")
-    
+
     # 交叉编码器 Reranker 模型名称
     reranker_api_key: str = Field("EMPTY", description="Reranker API Key")
     reranker_base_url: str = Field("http://localhost:7007/v1", description="Reranker Base URL")
@@ -50,6 +51,9 @@ class Settings(BaseSettings):
     context_inject_max_concurrency: int = Field(20, description="上下文注入并发数")
     context_inject_model_tier: str = Field("cheap", description="上下文注入使用的模型层级")
     graph_extract_model_tier: str = Field("cheap", description="实体关系抽取使用的模型层级")
+    node_profile_model_tier: str = Field("cheap", description="节点画像总结使用的模型层级")
+    node_profile_max_concurrency: int = Field(4, description="节点画像总结并发上限")
+    node_profile_batch_size: int = Field(100, description="节点画像批量写回大小")
     community_summary_model_tier: str = Field("cheap", description="社区摘要生成使用的模型层级")
     community_summary_max_concurrency: int = Field(4, description="社区摘要同层并发上限")
 
@@ -59,11 +63,11 @@ class Settings(BaseSettings):
     # ==========================================
     # 🕸️ 3. 数据库连接配置
     # ==========================================
-    # Neo4j 
+    # Neo4j
     neo4j_uri: str = Field("bolt://localhost:7687", description="Neo4j 连接地址")
     neo4j_username: str = Field("neo4j", description="Neo4j 用户名")
     neo4j_password: str = Field("admin123", description="Neo4j 密码")
-    
+
     # Milvus
     milvus_uri: str = Field("http://localhost:19530", description="Milvus 连接地址")
     milvus_db_name: str = Field("novel_chat", description="Milvus 默认数据库名称")
@@ -77,7 +81,7 @@ class Settings(BaseSettings):
     # ==========================================
     # KV 档案表本地文件路径
     memory_kv_path: Path = Field(
-        default=BASE_DIR / "data" / "memory" / "kv_profile.json", 
+        default=BASE_DIR / "data" / "memory" / "kv_profile.json",
         description="KV 档案表 (JSON) 存储路径"
     )
     # 每轮对话自动记忆在 Milvus 中的专属 Collection
@@ -95,6 +99,8 @@ class Settings(BaseSettings):
     rrf_k: int = Field(60, description="RRF (倒数秩融合) 的平滑常数 k")
     top_k_retrieval: int = Field(60, description="单路召回的初始 Chunk 数量")
     top_k_rerank: int = Field(10, description="Cross-Encoder 精排后最终喂给大模型的 Chunk 数量")
+    graph_entity_top_k: int = Field(8, description="Neo4j Entity 向量检索召回实体数")
+    graph_chunk_limit: int = Field(60, description="Neo4j 图扩展召回 chunk 上限")
     global_summary_top_k: int = Field(7, description="GLOBAL 模式宏观摘要召回数量")
     global_detail_chunk_top_k: int = Field(3, description="GLOBAL 模式微观细节补充切片数量")
     memory_summary_top_k: int = Field(3, description="MEMORY 模式返回的记忆摘要数量")
@@ -104,10 +110,11 @@ class Settings(BaseSettings):
 
     # 声明从哪读取环境变量
     model_config = SettingsConfigDict(
-        env_file=".env", 
+        env_file=".env",
         env_file_encoding="utf-8",
-        extra="ignore" # 忽略 .env 中未在类中定义的额外字段
+        extra="ignore"  # 忽略 .env 中未在类中定义的额外字段
     )
+
 
 # 实例化全局配置对象 (单例)
 # 其他模块只需执行: `from src.config import settings`

@@ -9,12 +9,14 @@ from src.ingestion.pipeline import IngestionPipeline
 
 # 导入 Phase 2 的两个核心工作组件
 from src.graphrag.graph_extractor import GraphExtractor
+from src.graphrag.node_profiler import NodeProfiler
 from src.graphrag.community_summarizer import CommunitySummarizer
 
 class GraphRAGPipeline:
     """
     Phase 2: GraphRAG 离线建图总控流水线
     Step 1: 读取 Phase 1 的 JSON，抽取实体与关系，打入 Neo4j。
+    Step 1.5: 汇总 Entity.all_descriptions，生成节点画像与向量索引字段。
     Step 2: 在 Neo4j 中运行 Leiden 社区划分，生成摘要，双写 Neo4j 与 Milvus。
     """
     def __init__(self):
@@ -48,21 +50,44 @@ class GraphRAGPipeline:
         # ---------------------------------------------------------
         # Step 1: 实体与关系提取 (Graph Extraction)
         # ---------------------------------------------------------
-        # print("\n🕸️ [Step 1] 开始从微观 Chunk 中提取实体与拓扑网...")
-        # extractor = GraphExtractor(
-        #     neo4j_uri=settings.neo4j_uri,
-        #     neo4j_user=neo4j_user,
-        #     neo4j_pwd=neo4j_pwd,
-        # )
+        print("\n🕸️ [Step 1] 开始从微观 Chunk 中提取实体与拓扑网...")
+        extractor = GraphExtractor(
+            neo4j_uri=settings.neo4j_uri,
+            neo4j_user=neo4j_user,
+            neo4j_pwd=neo4j_pwd,
+        )
         
-        # try:
-        #     await extractor.process_all_chunks(str(self.input_file))
-        # except Exception as e:
-        #     print(f"❌ 实体提取阶段发生错误: {e}")
-        #     raise e
-        # finally:
-        #     extractor.close()
-        #     print("✅ 实体提取完毕，底层知识图谱已写入 Neo4j！")
+        try:
+            await extractor.process_all_chunks(str(self.input_file))
+        except Exception as e:
+            print(f"❌ 实体提取阶段发生错误: {e}")
+            raise e
+        finally:
+            extractor.close()
+            print("✅ 实体提取完毕，底层知识图谱已写入 Neo4j！")
+
+        # ---------------------------------------------------------
+        # Step 1.5: 节点画像总结与 Entity 向量索引字段写入
+        # ---------------------------------------------------------
+        print("\n🧬 [Step 1.5] 开始生成 Entity 节点画像与向量...")
+        profiler = NodeProfiler(
+            neo4j_uri=settings.neo4j_uri,
+            neo4j_user=neo4j_user,
+            neo4j_pwd=neo4j_pwd,
+            embedding_model=embedding_model,
+            batch_size=settings.node_profile_batch_size,
+            max_concurrency=settings.node_profile_max_concurrency,
+            vector_dim=settings.milvus_vector_dim,
+        )
+
+        try:
+            await profiler.process_all_nodes()
+        except Exception as e:
+            print(f"❌ 节点画像阶段发生错误: {e}")
+            raise e
+        finally:
+            profiler.close()
+            print("✅ 节点画像与 Entity 向量索引字段已就绪！")
 
         # ---------------------------------------------------------
         # Step 2: 层次化社区划分与摘要生成 (Community Summarization)

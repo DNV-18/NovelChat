@@ -14,11 +14,13 @@ from src.utils.prompts import (
     build_graph_extractor_user_prompt,
 )
 
+
 class GraphExtractor:
     """
     Phase 2: GraphRAG 核心建图器
     负责让 LLM 从 Chunk 中提取实体网，并带入 chunk_id 安全合并到 Neo4j 图数据库。
     """
+
     def __init__(self, neo4j_uri, neo4j_user, neo4j_pwd):
         self.driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_pwd))
 
@@ -181,11 +183,20 @@ class GraphExtractor:
         cypher_query = """
         // 1. 合并（不存在则创建，存在则匹配）源节点和目标节点
         UNWIND $edges AS edge
+        
         MERGE (n1:Entity {id: edge.source})
-        ON CREATE SET n1.type = edge.source_type, n1.description = edge.source_desc
+        ON CREATE SET n1.type = edge.source_type, n1.all_descriptions = [edge.source_desc]
+        ON MATCH SET n1.all_descriptions = CASE 
+            WHEN edge.source_desc IN n1.all_descriptions THEN n1.all_descriptions 
+            ELSE coalesce(n1.all_descriptions, []) + edge.source_desc 
+        END
         
         MERGE (n2:Entity {id: edge.target})
-        ON CREATE SET n2.type = edge.target_type, n2.description = edge.target_desc
+        ON CREATE SET n2.type = edge.target_type, n2.all_descriptions = [edge.target_desc]
+        ON MATCH SET n2.all_descriptions = CASE 
+            WHEN edge.target_desc IN n2.all_descriptions THEN n2.all_descriptions 
+            ELSE coalesce(n2.all_descriptions, []) + edge.target_desc 
+        END
         
         // 2. 合并它们之间的关系
         WITH n1, n2, edge
@@ -205,12 +216,12 @@ class GraphExtractor:
                 ELSE coalesce(rel.source_chunk_ids, []) + $chunk_id 
             END
         """
-        
+
         # 整理要传给 Cypher 的参数格式
         formatted_edges = self._format_edges_with_node_meta(graph_data)
         if not formatted_edges:
             return
-        
+
         with self.driver.session() as session:
             session.run(cypher_query, edges=formatted_edges, chunk_id=chunk_id)
 
@@ -252,7 +263,8 @@ class GraphExtractor:
             raise ValueError("输入 JSON 格式错误：应为 chunk 列表")
 
         semaphore = asyncio.Semaphore(max_concurrency)
-        tasks = [asyncio.create_task(self._process_single_chunk(chunk, semaphore)) for chunk in chunks]
+        tasks = [asyncio.create_task(self._process_single_chunk(chunk, semaphore))
+                 for chunk in chunks]
 
         pbar = tqdm(total=len(tasks), desc="Graph 抽取入库", unit="chunk")
         for task in tasks:
