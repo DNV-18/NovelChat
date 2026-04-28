@@ -331,52 +331,28 @@ class HybridRetriever:
         query_vector = self._encode_query_vector(rewritten_query)
         memory_event_ids: List[str] = []
 
-        # 优先走路线B：Query 向量 -> Top-K 实体 -> 与当前用户关联边取交集。
-        created_by_exists = self._neo4j_property_key_exists("created_by")
+        # 严格语义：仅召回由 Agent_Memory 创建的用户记忆边。
         event_limit = max(max(1, top_k) * 8, settings.graph_entity_top_k)
-        if created_by_exists:
-            narrowed_cypher = """
-            CALL db.index.vector.queryNodes('entity_embedding', $entity_top_k, $query_vector)
-            YIELD node, score
-            WHERE node:Entity
-            MATCH (u:UserMemory {id: '[当前用户]'})-[r]-(node)
-            WHERE coalesce(r.created_by, '') = 'Agent_Memory'
-            UNWIND coalesce(r.memory_evidence_refs, []) AS mem_evt
-            WITH mem_evt, max(score) AS best_score
-            RETURN mem_evt
-            ORDER BY best_score DESC
-            LIMIT $event_limit
-            """
-        else:
-            narrowed_cypher = """
-            CALL db.index.vector.queryNodes('entity_embedding', $entity_top_k, $query_vector)
-            YIELD node, score
-            WHERE node:Entity
-            MATCH (u:UserMemory {id: '[当前用户]'})-[r]-(node)
-            UNWIND coalesce(r.memory_evidence_refs, []) AS mem_evt
-            WITH mem_evt, max(score) AS best_score
-            RETURN mem_evt
-            ORDER BY best_score DESC
-            LIMIT $event_limit
-            """
+        narrowed_cypher = """
+        CALL db.index.vector.queryNodes('entity_embedding', $entity_top_k, $query_vector)
+        YIELD node, score
+        WHERE node:Entity
+        MATCH (u:UserMemory {id: '[当前用户]'})-[r]-(node)
+        WHERE coalesce(r.created_by, '') = 'Agent_Memory'
+        UNWIND coalesce(r.memory_evidence_refs, []) AS mem_evt
+        WITH mem_evt, max(score) AS best_score
+        RETURN mem_evt
+        ORDER BY best_score DESC
+        LIMIT $event_limit
+        """
 
-        fallback_cypher = (
-            """
-            MATCH (u:UserMemory {id: '[当前用户]'})-[r]->()
-            WHERE coalesce(r.created_by, '') = 'Agent_Memory'
-            UNWIND coalesce(r.memory_evidence_refs, []) AS mem_evt
-            RETURN mem_evt
-            LIMIT $event_limit
-            """
-            if created_by_exists
-            else
-            """
-            MATCH (u:UserMemory {id: '[当前用户]'})-[r]->()
-            UNWIND coalesce(r.memory_evidence_refs, []) AS mem_evt
-            RETURN mem_evt
-            LIMIT $event_limit
-            """
-        )
+        fallback_cypher = """
+        MATCH (u:UserMemory {id: '[当前用户]'})-[r]->()
+        WHERE coalesce(r.created_by, '') = 'Agent_Memory'
+        UNWIND coalesce(r.memory_evidence_refs, []) AS mem_evt
+        RETURN mem_evt
+        LIMIT $event_limit
+        """
 
         try:
             with self.neo4j_driver.session() as session:
